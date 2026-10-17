@@ -34,28 +34,23 @@ def log(msg):
     print("[build] %s" % msg, flush=True)
 
 
-def nice_max(v):
-    """轴上限取整到好看刻度（1/1.2/1.5/2/2.5/3/4/5/6/8/10 × 10^n）"""
+def nice_axis(peak, n, pad=1.0, floor_at=None):
+    """轴上限与刻度步长都取整：返回 (max, step)，满足 max = step * n >= peak * pad。
+    step 优先取整数（份额/百分比轴刻度可读性）；债券等小额轴允许 1 位小数。"""
+    v = float(peak) * pad
+    if floor_at is not None:
+        v = max(v, float(floor_at))
     if v <= 0:
-        return 1.0
-    e = math.floor(math.log10(v))
-    base = 10 ** e
+        return 1.0, 1.0
+    e = math.floor(math.log10(v / n))
     for m in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10):
-        if v <= m * base:
-            return m * base
-    return 10 * base
-
-
-def nice_floor(v):
-    """轴下限取整（v<=0）"""
-    if v >= 0:
-        return 0.0
-    e = math.floor(math.log10(-v))
-    base = 10 ** e
-    for m in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10):
-        if -v <= m * base:
-            return -m * base
-    return -10 * base
+        step = m * (10 ** e)
+        if step * n >= v:
+            if step >= 1 and step != int(step):
+                step = float(math.ceil(step))  # 步长向上取整
+            return step * n, step
+    step = float(10 ** (e + 1))
+    return step * n, step
 
 
 def load_share_df():
@@ -167,14 +162,18 @@ def main():
         c["panel2"] = p2s
         c["panel3"] = {theme: p3 for theme, p3, _ in d5_all}
 
-        # 轴范围
+        # 轴范围（上限与刻度步长都取整：max = step × n，刻度全是整数）
         peak1 = max(max(v) for v in p1s.values())
         peak2 = max(max(v) for v in p2s.values())
         lo3 = min(min(v) for v in c["panel3"].values())
         hi3 = max(max(v) for v in c["panel3"].values())
-        c["y1max"] = nice_max(peak1 * 1.12)
-        c["y2max"] = max(nice_max(peak2 * 1.06), 110)
-        c["y3"] = [min(nice_floor(lo3 * 0.99), 98.0), max(nice_max(hi3 * 1.01), 102.0)]
+        c["y1max"], c["y1int"] = nice_axis(peak1, 7, 1.12)
+        c["y2max"], c["y2int"] = nice_axis(peak2, 5, 1.06, floor_at=110)
+        lo3v = min(math.floor(lo3 * 0.98), 98)
+        span = max(hi3 * 1.02, 102) - lo3v
+        _, step3 = nice_axis(span, 5, 1.0)
+        c["y3"] = [lo3v, lo3v + step3 * 5]
+        c["y3int"] = step3
 
         # TOP3（按变化幅度绝对值排序，与原看板口径一致）
         c["top3_p2"] = fmt_top3(sorted(((n, v[-1] - 100) for n, v in p2s.items()),
@@ -243,7 +242,8 @@ def main():
     DATA = {
         "months": cats[0]["months"], "days5": cats[0]["days5"],
         "cats": [{"key": c["name"], "name": c["name"], "y1max": c["y1max"],
-                  "y2max": c["y2max"], "y3": c["y3"],
+                  "y1int": c["y1int"], "y2max": c["y2max"], "y2int": c["y2int"],
+                  "y3": c["y3"], "y3int": c["y3int"],
                   "top3_p2": c["top3_p2"], "top3_p3": c["top3_p3"],
                   "panel1": c["panel1"], "panel2": c["panel2"], "panel3": c["panel3"],
                   "colors": c["colors"], "order": c["order"],
@@ -410,7 +410,7 @@ function initTab(i) {
     legend: baseLegend, grid: gridCommon,
     tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v.toLocaleString() }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
-    yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y1max, interval: c.y1max / 7 }),
+    yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y1max, interval: c.y1int }),
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
     series: mkSeries(c.panel1, colors)
   });
@@ -421,7 +421,7 @@ function initTab(i) {
     legend: baseLegend, grid: gridCommon,
     tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v + '%' }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
-    yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2max / 5,
+    yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2int,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
     series: mkSeries(c.panel2, colors, {
@@ -443,7 +443,7 @@ function initTab(i) {
     xAxis: { type: 'category', boundaryGap: false, data: DAYS5, name: '日期',
              nameLocation: 'middle', nameGap: 28, nameTextStyle: { color: '#666', fontSize: 12 },
              axisLabel: { color: '#666', fontSize: 12 } },
-    yAxis: Object.assign({}, yAxisCommon, { min: y3[0], max: y3[1], interval: (y3[1] - y3[0]) / 5,
+    yAxis: Object.assign({}, yAxisCommon, { min: y3[0], max: y3[1], interval: c.y3int,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
     series: mkSeries(c.panel3, colors, {
       markLine: { symbol: 'none', lineStyle: { color: '#999', type: 'dashed', width: 1 },
