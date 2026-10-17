@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+collect.py — 每交易日采集全市场 ETF 份额，落 data/share_YYYY.parquet
+
+数据源（均免费、无需 key）：
+  1. 上交所  ak.fund_etf_scale_sse(date)          官方份额，支持历史日期
+  2. 深交所  ak.fund_scale_daily_szse(start, end) 官方日频份额
+  3. 东财    ak.fund_etf_spot_em()                 全市场快照（含"最新份额"），兜底
+
+用法：
+  python collect.py                               # 采集今天（非交易日自动退出；今日未更新则回退上一交易日）
+  python collect.py --date 20261016               # 指定日期
+  python collect.py --backfill 20260701:20261016  # 区间回填
+  python collect.py --diag                        # 诊断模式：打印各源列名与样本
+"""
+import argparse
+import datetime as dt
+import os
+import sys
+import time
+
+import pandas as pd
+
+# 默认禁代理直连（交易所站点直连最稳；GitHub Actions 本就没有代理）。
+# 如你的网络必须走代理才能访问外网，加 --use-proxy
+_PROXY_KEYS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
+_ORIG_PROXY = {k: os.environ.get(k) for k in _PROXY_KEYS}
+for _k in _PROXY_KEYS:
+    os.environ.pop(_k, None)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(ROOT, "data")
+
+
+def log(msg):
+    print("[%s] %s" % (dt.datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+
+
+# ---------------- 交易日 ----------------
+def load_trade_dates():
+    import akshare as ak
+    df = ak.tool_trade_date_hist_sina()
+    # 注意：trade_date 列是 datetime，必须格式化成 YYYYMMDD 字符串
+    return sorted(set(pd.to_datetime(df["trade_date"]).dt.strftime("%Y%m%d")))
+
+
+def prev_trade_day(dates, day):
+    prior = [d for d in dates if d < day]
+    return prior[-1] if prior else None
+
+
+# ---------------- 数据源 ----------------
+def fetch_sse(date):  # date: YYYYMMDD
+    import akshare as ak
+    df = ak.fund_etf_scale_sse(date=date)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # 份额单位自适应：akshare 各版本可能返回"份"或"万份"
+    raw = pd.to_numeric(df["基金份额"], errors="coerce")
+    unit = 1e4 if raw.median(skipna=True) < 1e6 else 1.0
+    if unit != 1.0:
+        log("上交所份额疑似万份单位，按万份换算")
+    out = pd.DataFrame({
+        "trade_date": pd.to_datetime(df["统计日期"], errors="coerce").dt.strftime("%Y-%m-%d"),
+        "code": df["基金代码"].astype(str).str.zfill(6),
+        "name": df["基金简称"].astype(str),
+        "share": raw * unit / 1e8,  # → 亿份
+        "size": None, "nav": None, "close": None, "source": "sse",
+    })
+    return out
+
+
+def fetch_szse(start, end):  # YYYYMMDD
+    import akshare as ak
+    df = ak.fund_scale_daily_szse(start_date=start, end_date=end, symbol="ETF")
+    if df is None or df.empty:
+        return pd.DataFrame()
+    cols = list(df.columns)
+
+    def pick(*keys):
+        for k in keys:
+            for c in cols:
+                if k in c:
+                    return c
+        return None
+
+    c_date = pick("日期")
+    c_code = pick("基金代码", "代码")
+    c_name = pick("基金简称", "名称")
+    c_share = pick("份额")
+    c_nav = pick("净值")
+    if c_code is None or c_share is None:
+        log("深交所返回列异常: %s" % cols)
+        return pd.DataFrame()
+    dates = df[c_date] if c_date else start  # 无日期列时用请求首日
+    out = pd.DataFrame({
+        "trade_date": pd.to_datetime(dates, errors="coerce").dt.strftime("%Y-%m-%d"),
+        "code": df[c_code].astype(str).str.zfill(6),
+        "name": df[c_name].astype(str) if c_name else "",
+        "share": pd.to_numeric(df[c_share].astype(str).str.replace(",", ""), errors="coerce") / 1e8,
+        "size": None, "nav": pd.to_numeric(df[c_nav], errors="coerce") if c_nav else None,
+        "close": None, "source": "szse",
+    })
+    return out
+
+
+def fetch_em(day8):  # 东财快照，day8: YYYYMMDD（快照的业务日期）
+    import akshare as ak
+    df = ak.fund_etf_spot_em()
+    if df is None or df.empty:
+        return pd.DataFrame()
+    share = pd.to_numeric(df["最新份额"], errors="coerce")
+    unit = 1e8 if share.max(skipna=True) > 1e11 else 1e4  # 份 or 万份 → 亿份
+    size = (pd.to_numeric(df["总市值"], errors="coerce") / 1e8) if "总市值" in df.columns else None
+    close = pd.to_numeric(df["最新价"], errors="coerce") if "最新价" in df.columns else None
+    out = pd.DataFrame({
+        "trade_date": pd.to_datetime(day8).strftime("%Y-%m-%d"),
+        "code": df["代码"].astype(str).str.zfill(6),
+        "name": df["名称"].astype(str),
+        "share": share / unit,
+        "size": size, "nav": None, "close": close,
+        "source": "em",
+    })
+    return out
+
+
+# ---------------- 存储 ----------------
+# 存档策略：每日一个 parquet 小文件（data/daily/share_YYYYMMDD.parquet）。
+# 一日一文件天然幂等（同日重跑覆盖），且 git 只新增不重写，仓库不会膨胀。
+DAILY_DIR = os.path.join(DATA_DIR, "daily")
+
+
+def upsert(new: pd.DataFrame) -> int:
+    if new.empty:
+        return 0
+    total = 0
+    for (td,), grp in new.groupby(["trade_date"], sort=True):
+        day = td.replace("-", "")
+        path = os.path.join(DAILY_DIR, "share_%s.parquet" % day)
+        grp = (grp.drop_duplicates(subset=["trade_date", "code"], keep="last")
+                  .sort_values(["trade_date", "code"])
+                  .reset_index(drop=True))
+        os.makedirs(DAILY_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        grp.to_parquet(tmp, index=False)
+        os.replace(tmp, path)  # 原子替换，防中断写坏
+        total += len(grp)
+        log("写入 %s（%d 只）" % (os.path.basename(path), len(grp)))
+    return total
+
+
+# ---------------- 主流程 ----------------
+import requests as _rq
+
+_NET_ERRS = (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout,
+             _rq.exceptions.ChunkedEncodingError, TimeoutError, ConnectionError)
+
+
+def retry(fn, tries=3, pause=4, what=""):
+    """网络错误重试；数据型错误（如交易所当日无数据）直接放弃返回空"""
+    for i in range(tries):
+        try:
+            return fn()
+        except Exception as e:
+            if isinstance(e, _NET_ERRS) and i < tries - 1:
+                log("%s网络错误，第 %d 次重试: %s" % (what, i + 1, str(e)[:100]))
+                time.sleep(pause)
+                continue
+            log("%s失败: %s" % (what, str(e)[:150]))
+            return pd.DataFrame()
+    return pd.DataFrame()
+
+
+def collect_one(day8: str, with_em: bool = True) -> pd.DataFrame:
+    """采集单个交易日 YYYYMMDD，返回合并后的长表"""
+    frames = []
+    s = retry(lambda: fetch_sse(day8), what="上交所 ")
+    log("上交所 %s: %d 只" % (day8, len(s)))
+    frames.append(s)
+    z = retry(lambda: fetch_szse(day8, day8), what="深交所 ")
+    log("深交所 %s: %d 只" % (day8, len(z)))
+    frames.append(z)
+    if with_em:
+        e_ = retry(lambda: fetch_em(day8), tries=2, what="东财 ")
+        log("东财快照: %d 只" % len(e_))
+        frames.append(e_)
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.dropna(subset=["share"])
+    merged = merged[merged["share"] > 0]
+    # 同日同 code 优先级：sse > szse > em
+    prio = {"sse": 0, "szse": 1, "em": 2}
+    merged["_p"] = merged["source"].map(prio)
+    merged = (merged.sort_values("_p")
+                    .drop_duplicates(subset=["trade_date", "code"], keep="first")
+                    .drop(columns="_p"))
+    return merged
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--date", help="单个交易日 YYYYMMDD")
+    ap.add_argument("--backfill", help="区间回填 YYYYMMDD:YYYYMMDD")
+    ap.add_argument("--no-em", action="store_true", help="不用东财快照")
+    ap.add_argument("--use-proxy", action="store_true", help="保留系统代理（默认禁代理直连）")
+    ap.add_argument("--diag", action="store_true", help="诊断：打印各源列名与样本")
+    args = ap.parse_args()
+
+    if args.use_proxy:
+        for k, v in _ORIG_PROXY.items():
+            if v is not None:
+                os.environ[k] = v
+
+    if args.diag:
+        import akshare as ak
+        for fn, kw in [("fund_etf_scale_sse", {"date": "20261016"}),
+                       ("fund_scale_daily_szse", {"start_date": "20261016", "end_date": "20261016", "symbol": "ETF"})]:
+            try:
+                df = getattr(ak, fn)(**kw)
+                print("== %s ==\n列: %s\n%s\n" % (fn, list(df.columns), df.head(3).to_string()))
+            except Exception as e:
+                print("== %s == 失败: %s\n" % (fn, e))
+        try:
+            df = ak.fund_etf_spot_em()
+            print("== fund_etf_spot_em ==\n列: %s\n%s\n" % (list(df.columns), df.head(3).to_string()))
+        except Exception as e:
+            print("== fund_etf_spot_em == 失败: %s" % e)
+        return
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tds = load_trade_dates()
+    today = dt.date.today().strftime("%Y%m%d")
+
+    if args.backfill:
+        start, end = args.backfill.split(":")
+        days = [d for d in tds if start <= d <= end]
+        log("回填 %s ~ %s，共 %d 个交易日（%s ~ %s）" % (start, end, len(days), days[0] if days else "-", days[-1] if days else "-"))
+        ok_days = 0
+        for i, d in enumerate(days, 1):
+            td = pd.to_datetime(d).strftime("%Y-%m-%d")
+            s = retry(lambda: fetch_sse(d), tries=2, what="上交所 ")
+            z = retry(lambda: fetch_szse(d, d), tries=2, what="深交所 ")
+            merged = pd.concat([f for f in (s, z) if f is not None and not f.empty], ignore_index=True) \
+                if any(f is not None and not f.empty for f in (s, z)) else pd.DataFrame()
+            if not merged.empty:
+                merged = merged.dropna(subset=["share"])
+                merged = merged[merged["share"] > 0]
+                prio = {"sse": 0, "szse": 1, "em": 2}
+                merged["_p"] = merged["source"].map(prio)
+                merged = (merged.sort_values("_p")
+                                .drop_duplicates(subset=["trade_date", "code"], keep="first")
+                                .drop(columns="_p"))
+                upsert(merged)
+                ok_days += 1
+            else:
+                log("%s 无数据（交易所未披露或非交易日），跳过" % d)
+            if i % 20 == 0 or i == len(days):
+                log("进度 %d/%d（成功 %d 天）" % (i, len(days), ok_days))
+            time.sleep(0.3)
+        log("回填完成：%d/%d 天入库" % (ok_days, len(days)))
+        return
+
+    day = args.date or today
+    if not args.date and day not in tds:
+        log("今天 %s 非交易日，退出" % day)
+        return
+    merged = collect_one(day, with_em=not args.no_em)
+    if merged.empty and not args.date:
+        prev = prev_trade_day(tds, day)
+        if prev:
+            log("今日数据未更新，回退到上一交易日 %s" % prev)
+            merged = collect_one(prev, with_em=not args.no_em)
+    if merged.empty:
+        log("未采到任何数据")
+        sys.exit(1)
+    n = upsert(merged)
+    log("完成，入库 %d 只" % (len(merged) if not merged.empty else 0))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,73 @@
+# ETF 份额每日自动追踪
+
+每个交易日盘后自动采集全市场 ETF 份额，按主题聚合成 N-Tab HTML 看板，数据存档于 git，看板发布到 GitHub Pages。
+
+## 工作流
+
+```
+每天 UTC 11:00（北京 19:00）
+  → GitHub Actions 自动触发
+  → collect.py  采集上交所/深交所/东财三源 ETF 份额（T+1）
+  → build_report.py  按 etf_map.csv 聚合主题，生成 docs/index.html
+  → git commit data/daily/ + docs/
+  → 发布到 gh-pages 分支 → GitHub Pages 手机/电脑随时看
+```
+
+非交易日自动跳过（零提交）。也可在 Actions 页面点 "Run workflow" 手动补跑。
+
+## 首次配置（4 步，约 2 分钟）
+
+1. **建仓库**：在 GitHub 建一个空仓库（公开/私有均可），把本目录全部文件 push 上去：
+   ```bash
+   git init && git add -A && git commit -m "init"
+   git branch -M main
+   git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+   git push -u origin main
+   ```
+2. **开权限**：仓库 Settings → Actions → General → Workflow permissions，选 **"Read and write contents"**。
+3. **开 Pages**：仓库 Settings → Pages → Source 选 **"Deploy from a branch"** → Branch 选 `gh-pages` / `(root)` → Save。
+4. **手动触发一次**：Actions → "etf-share-daily" → "Run workflow"，确认三个步骤全绿。之后每天自动跑，看板地址：`https://<你的用户名>.github.io/<仓库名>/`。
+
+## 本地用法
+
+```bash
+pip install -r requirements.txt
+
+python src/collect.py                          # 采集今天（非交易日自动退出）
+python src/collect.py --date 20261016          # 指定日期
+python src/collect.py --backfill 20250101:20261016   # 区间回填历史
+python src/build_report.py                     # 生成看板（月频）
+python src/build_report.py --freq daily        # 日频视图
+```
+
+## 目录结构
+
+```
+├── .github/workflows/daily.yml   # 定时任务
+├── src/
+│   ├── collect.py                # 采集（三源：上交所/深交所/东财）+ 落库
+│   ├── build_report.py           # parquet → HTML 看板
+│   └── etf_map.csv               # ETF 代码 → 类别/主题 映射表（★唯一需要人工维护）
+├── data/daily/share_YYYYMMDD.parquet   # 每日份额存档（一日一文件，git 友好）
+├── docs/                         # 生成的看板（Pages 发布目录）
+└── vendor/echarts.min.js         # ECharts 5.4.3（内联进单文件 HTML，离线可用）
+```
+
+## 维护映射表（重要）
+
+看板按 `src/etf_map.csv` 把 ETF 归入 8 大类主题，**份额按主题内 ETF 求和**。
+第一版是模板：带“代码待核对”的行请对照行情软件核实，随时可以增删代码和主题——
+改完跑一次 `python src/build_report.py` 即可，无需重新采集。
+
+## 数据口径说明
+
+- **T+1**：ETF 份额由交易所次日披露，19:00 跑任务取到的是当日收盘份额；未更新时自动回退上一交易日。
+- **单位**：统一为“亿份”。
+- **三源优先级**：上交所 > 深交所 > 东财快照（兜底）；任一方失败不影响其他源。
+- **akshare 版本**：接口随 akshare 版本变动，requirements 锁了 `1.19.1`；升级前先本地跑一次 `--diag` 确认列名。
+
+## 常见问题
+
+- **Actions 里采集失败**：查看 run 日志；交易所接口偶发 502 属正常，脚本内置重试，且非交易日零提交不会报错。
+- **想改统计时间**：编辑 workflow 里 cron（注意是 UTC，+8 小时是北京时间）。
+- **Pages 404**：确认 Settings → Pages 选了 gh-pages 分支，且 workflow 最后一次运行是绿的。
