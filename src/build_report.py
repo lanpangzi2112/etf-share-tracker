@@ -235,6 +235,37 @@ def main():
     if not cats:
         raise SystemExit("没有任何类别生成成功，请检查 etf_map.csv 与数据")
 
+    # ---------- 全局对齐轴 ----------
+    # 各主题起点不同（补采 2021-2024 后尤其明显：晚上市的基金主题起点晚），
+    # 月份/日期轴取所有主题的并集，序列 reindex 对齐、缺失填 None（前端断点）。
+    def _union_axis(freq):
+        idx = set()
+        for c in cats:
+            for _, s in c["themes"]:
+                sm = month_end_sample(s) if freq == "month" else s
+                idx |= set(sm.index)
+        return sorted(idx)
+
+    def _align(s, axis, freq):
+        sm = month_end_sample(s) if freq == "month" else s
+        return sm.reindex(axis)
+
+    def _num(v):
+        return None if v is None or pd.isna(v) else round(float(v), 2)
+
+    def _valid(v):
+        return [x for x in v if x is not None]
+
+    def _first_valid(v):
+        vv = _valid(v)
+        return vv[0] if vv else None
+
+    def _last_valid(v):
+        vv = _valid(v)
+        return vv[-1] if vv else None
+
+    GLOBAL_AXIS = _union_axis(args.freq)
+
     # ---------- 每类面板 ----------
     for c in cats:
         # 图3 用日频最近 5 个交易日
@@ -247,31 +278,24 @@ def main():
         n5 = max(len(x[2]) for x in d5_all)
         c["days5"] = next(x[2] for x in d5_all if len(x[2]) == n5)
 
-        if args.freq == "month":
-            xs, p1s, p2s = [], {}, {}
-            for theme, s in c["themes"]:
-                sm = month_end_sample(s)
-                p1 = [round(float(v), 2) for v in sm.values]
-                xs = [d.strftime("%Y-%m") for d in sm.index]
-                p1s[theme] = p1
-                b = p1[0] if p1 and p1[0] else 1.0
-                p2s[theme] = [round(v / b * 100, 1) for v in p1]
-        else:
-            xs, p1s, p2s = [], {}, {}
-            for theme, s in c["themes"]:
-                p1 = [round(float(v), 2) for v in s.values]
-                xs = [d.strftime("%Y-%m-%d") for d in s.index]
-                p1s[theme] = p1
-                b = p1[0] if p1 and p1[0] else 1.0
-                p2s[theme] = [round(v / b * 100, 1) for v in p1]
+        xs, p1s, p2s = [], {}, {}
+        for theme, s in c["themes"]:
+            al = _align(s, GLOBAL_AXIS, args.freq)
+            xs = [d.strftime("%Y-%m") if args.freq == "month" else d.strftime("%Y-%m-%d")
+                  for d in GLOBAL_AXIS]
+            p1 = [_num(v) for v in al.values]
+            p1s[theme] = p1
+            b = _first_valid(p1)
+            p2s[theme] = [None if v is None else round(v / b * 100, 1)
+                          for v in p1] if b else [None] * len(p1)
         c["months"] = xs
         c["panel1"] = p1s
         c["panel2"] = p2s
         c["panel3"] = {theme: p3 for theme, p3, _ in d5_all}
 
         # 轴范围（上限与刻度步长都取整：max = step × n，刻度全是整数）
-        peak1 = max(max(v) for v in p1s.values())
-        peak2 = max(max(v) for v in p2s.values())
+        peak1 = max(max(_valid(v)) for v in p1s.values())
+        peak2 = max(max(_valid(v)) for v in p2s.values())
         lo3 = min(min(v) for v in c["panel3"].values())
         hi3 = max(max(v) for v in c["panel3"].values())
         c["y1max"], c["y1int"] = nice_axis(peak1, 7, 1.12)
@@ -282,24 +306,26 @@ def main():
         c["y3"] = [lo3v, lo3v + step3 * 5]
         c["y3int"] = step3
 
-        # TOP3（按变化幅度绝对值排序，与原看板口径一致）
-        c["top3_p2"] = fmt_top3(sorted(((n, v[-1] - 100) for n, v in p2s.items()),
+        # TOP3（按变化幅度绝对值排序，与原看板口径一致；取各序列最后有效值）
+        c["top3_p2"] = fmt_top3(sorted(((n, _last_valid(v) - 100) for n, v in p2s.items()),
                                        key=lambda x: -abs(x[1])))
         c["top3_p3"] = fmt_top3(sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()),
                                        key=lambda x: -abs(x[1])))
 
         # 分析要素
-        chg2 = sorted(((n, v[-1] - 100) for n, v in p2s.items()), key=lambda x: -x[1])
+        chg2 = sorted(((n, _last_valid(v) - 100) for n, v in p2s.items()), key=lambda x: -x[1])
         chg3 = sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()), key=lambda x: -abs(x[1]))
         c["leader"], c["leader_chg"] = chg2[0]
         c["laggard"], c["laggard_chg"] = chg2[-1]
         c["d5_leader"], c["d5_chg"] = chg3[0]
         c["d5_laggard"], c["d5_lchg"] = chg3[-1]
-        peak_i = max(range(len(xs)), key=lambda i: p1s[c["leader"]][i])
-        c["leader_peak"] = xs[peak_i]
-        c["leader_end"] = p1s[c["leader"]][-1]
+        lead_p1 = p1s[c["leader"]]
+        peak_i = max((i for i, v in enumerate(lead_p1) if v is not None),
+                     key=lambda i: lead_p1[i], default=0)
+        c["leader_peak"] = xs[peak_i] if xs else "-"
+        c["leader_end"] = _last_valid(lead_p1)
         c["n_series"] = len(c["themes"])
-        peak_v = p1s[c["leader"]][peak_i]
+        peak_v = lead_p1[peak_i] if peak_i < len(lead_p1) else None
         c["drawdown"] = (c["leader_end"] - peak_v) / peak_v * 100 if peak_v else 0.0
 
         start_lbl = xs[0] if xs else "-"
