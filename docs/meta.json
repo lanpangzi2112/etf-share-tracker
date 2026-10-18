@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-17 14:05:02",
+  "generated_at": "2026-10-18 15:28:05",
   "freq": "month",
   "data_until": "2026-10-16",
   "n_etf": 1693,
@@ -17,7 +17,7 @@
       "name": "科技",
       "n": 6,
       "leader": "通信",
-      "leader_chg": 3663.3,
+      "leader_chg": 527.0,
       "d5": "军工科技",
       "d5_chg": 3.4
     },
@@ -56,16 +56,16 @@
     {
       "name": "金融地产",
       "n": 4,
-      "leader": "银行",
-      "leader_chg": 137.3,
+      "leader": "券商",
+      "leader_chg": 135.7,
       "d5": "银行",
       "d5_chg": -2.0
     },
     {
       "name": "债券",
       "n": 3,
-      "leader": "长期利率债",
-      "leader_chg": 435.3,
+      "leader": "地方政府债",
+      "leader_chg": 556.2,
       "d5": "长期利率债",
       "d5_chg": 7.2
     }

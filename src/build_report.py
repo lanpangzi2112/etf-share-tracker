@@ -63,23 +63,47 @@ def load_share_df():
     return df
 
 
-# 单日份额变动超过该倍数即判定为份额折算（拆分/合并）。
-# 现实中 ETF 单日真实申购极少超过 +90%，而折算常是 2:1、3:1、10:1 乃至
-# "净值归一型"的非整数倍（如 3.09:1），因此用观测比例而非取整比例复权。
+# 单日份额变动超过该倍数即视为"折算候选"（拆分/合并）。
+# 注意：真实大额申购同样会造成跳变，仅凭阈值无法区分，因此只对
+# src/splits.csv 白名单里登记过的事件复权，其余候选只告警不改数。
 SPLIT_HI = 1.9
 SPLIT_LO = 1.0 / 1.9
+SPLITS_CSV = os.path.join(ROOT, "src", "splits.csv")
 
 
-def adjust_splits(df):
-    """份额折算前复权：把折算日之前的份额按实际观测比例乘回去，
-    使序列在"当前份额单位"下连续，避免把拆分当成申购赎回。
+def load_splits():
+    """读取人工确认的份额折算事件表 → {code: {日期: 比例}}"""
+    if not os.path.exists(SPLITS_CSV):
+        log("警告：未找到 src/splits.csv，不做份额折算复权")
+        return {}
+    conf = pd.read_csv(SPLITS_CSV, dtype=str)
+    out = {}
+    for _, r in conf.iterrows():
+        code = str(r["code"]).zfill(6)
+        d = pd.Timestamp(str(r["date"])).strftime("%Y-%m-%d")
+        out.setdefault(code, {})[d] = float(r["ratio"])
+    log("折算白名单：%d 起事件" % sum(len(v) for v in out.values()))
+    return out
 
-    原始 parquet 不改动，复权只发生在生成报告时。返回带新 share 列的副本。
+
+def adjust_splits(df, splits, watch_codes=None):
+    """份额折算前复权（白名单制）。
+
+    只有 src/splits.csv 登记过的事件才复权：把折算日之前的份额按观测比例
+    乘回去，使序列在"当前份额单位"下连续。未登记的跳变一律不改动——因为
+    真实大额申购与拆分在份额序列上无法区分，必须先用净值确认再登记。
+
+    watch_codes 内的代码若出现未登记候选，会逐条告警（其余代码只计数），
+    避免日志被非映射标的刷屏。
+
+    原始 parquet 不改动，复权只发生在生成报告时。
     """
     df = df.sort_values(["code", "trade_date"]).copy()
     df["share"] = df["share"].astype(float)
     factor = pd.Series(1.0, index=df.index)
-    events = []
+    applied, pending = [], []
+    watch = set(watch_codes or ())
+
     for code, g in df.groupby("code", sort=False):
         if len(g) < 3:
             continue
@@ -87,16 +111,33 @@ def adjust_splits(df):
         ratio = (s / s.shift(1)).to_numpy()
         idx = g.index.to_numpy()
         dates = g["trade_date"].to_numpy()
+        conf = splits.get(code, {})
         for k in range(1, len(g)):
             r = ratio[k]
-            if r > SPLIT_HI or r < SPLIT_LO:
-                factor.loc[idx[:k]] *= r
-                events.append((code, pd.Timestamp(dates[k]).strftime("%Y-%m-%d"), r))
-    if events:
+            if r <= SPLIT_HI and r >= SPLIT_LO:
+                continue
+            d = pd.Timestamp(dates[k]).strftime("%Y-%m-%d")
+            if d in conf:
+                # 用白名单里的精确折算因子（净值推导），而非观测倍率——
+                # 折算当日可能同时有真实申赎，用观测倍率会把它一并抹掉
+                factor.loc[idx[:k]] *= conf[d]
+                applied.append((code, d, conf[d]))
+                if abs(r / conf[d] - 1) > 0.01:
+                    log("  提示：%s %s 折算日另有约 %+.1f%% 真实申赎（已保留）"
+                        % (code, d, (r / conf[d] - 1) * 100))
+            elif code in watch:
+                pending.append((code, d, r))
+
+    if applied:
         df["share"] = df["share"] * factor
-        for code, d, r in events:
-            log("  折算复权 %s %s 比例 %.4f" % (code, d, r))
-    log("份额折算复权：%d 起事件，涉及 %d 只 ETF" % (len(events), len({e[0] for e in events})))
+        for code, d, r in applied:
+            log("  折算复权 %s %s 因子 %.4f" % (code, d, r))
+    log("份额折算复权：已按白名单复权 %d 起" % len(applied))
+    for code, d, r in pending:
+        log("  [警告] 疑似折算未确认 %s %s 倍率 %.4f，未复权"
+            "（确认后登记到 src/splits.csv）" % (code, d, r))
+    if pending:
+        log("共 %d 起未登记候选，建议运行 python src/check_splits.py 核对" % len(pending))
     return df
 
 
@@ -137,10 +178,11 @@ def main():
     df = load_share_df()
     log("数据范围 %s ~ %s，共 %d 行，%d 只 ETF"
         % (df["trade_date"].min().date(), df["trade_date"].max().date(), len(df), df["code"].nunique()))
-    df = adjust_splits(df)  # 份额折算前复权（原始数据不动）
 
     emap = pd.read_csv(MAP_CSV, dtype=str)
     emap["code"] = emap["code"].str.zfill(6)
+    # 份额折算前复权：只认 src/splits.csv 白名单（原始数据不动）
+    df = adjust_splits(df, load_splits(), set(emap["code"]))
     all_codes = set(df["code"])
 
     cats = []
