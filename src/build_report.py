@@ -72,26 +72,36 @@ SPLITS_CSV = os.path.join(ROOT, "src", "splits.csv")
 
 
 def load_splits():
-    """读取人工确认的份额折算事件表 → {code: {日期: 比例}}"""
+    """读取已核对的份额异动事件表 → (折算表, 申购表)，均为 {code: {日期: 比例}}。
+
+    折算表：确认是份额拆分/合并，需要复权；
+    申购表：确认是真实大额申赎，不复权也不告警。
+    旧格式（无 verdict 列）一律视为折算，保持向后兼容。
+    """
     if not os.path.exists(SPLITS_CSV):
         log("警告：未找到 src/splits.csv，不做份额折算复权")
-        return {}
+        return {}, {}
     conf = pd.read_csv(SPLITS_CSV, dtype=str)
-    out = {}
+    cols = {c.strip().lower(): c for c in conf.columns}
+    ver_col = cols.get("verdict")
+    adj, flow = {}, {}
     for _, r in conf.iterrows():
         code = str(r["code"]).zfill(6)
         d = pd.Timestamp(str(r["date"])).strftime("%Y-%m-%d")
-        out.setdefault(code, {})[d] = float(r["ratio"])
-    log("折算白名单：%d 起事件" % sum(len(v) for v in out.values()))
-    return out
+        verdict = (str(r[ver_col]).strip() if ver_col else "") or "折算"
+        (adj if verdict == "折算" else flow).setdefault(code, {})[d] = float(r["ratio"])
+    log("折算白名单：复权 %d 起，已确认真实申购 %d 起"
+        % (sum(len(v) for v in adj.values()), sum(len(v) for v in flow.values())))
+    return adj, flow
 
 
-def adjust_splits(df, splits, watch_codes=None):
+def adjust_splits(df, splits, watch_codes=None, known_flows=None):
     """份额折算前复权（白名单制）。
 
-    只有 src/splits.csv 登记过的事件才复权：把折算日之前的份额按观测比例
-    乘回去，使序列在"当前份额单位"下连续。未登记的跳变一律不改动——因为
-    真实大额申购与拆分在份额序列上无法区分，必须先用净值确认再登记。
+    只有 src/splits.csv 里 verdict=折算 的事件才复权：把折算日之前的份额
+    按精确折算因子乘回去，使序列在"当前份额单位"下连续。未登记的跳变一律
+    不改动——因为真实大额申购与拆分在份额序列上无法区分，必须先用净值
+    确认再登记。已登记为"申购"的事件静默跳过（不再告警）。
 
     watch_codes 内的代码若出现未登记候选，会逐条告警（其余代码只计数），
     避免日志被非映射标的刷屏。
@@ -102,6 +112,7 @@ def adjust_splits(df, splits, watch_codes=None):
     df["share"] = df["share"].astype(float)
     factor = pd.Series(1.0, index=df.index)
     applied, pending = [], []
+    known_flows = known_flows or {}
     watch = set(watch_codes or ())
 
     for code, g in df.groupby("code", sort=False):
@@ -112,6 +123,7 @@ def adjust_splits(df, splits, watch_codes=None):
         idx = g.index.to_numpy()
         dates = g["trade_date"].to_numpy()
         conf = splits.get(code, {})
+        flows = known_flows.get(code, {})
         for k in range(1, len(g)):
             r = ratio[k]
             if r <= SPLIT_HI and r >= SPLIT_LO:
@@ -125,6 +137,8 @@ def adjust_splits(df, splits, watch_codes=None):
                 if abs(r / conf[d] - 1) > 0.01:
                     log("  提示：%s %s 折算日另有约 %+.1f%% 真实申赎（已保留）"
                         % (code, d, (r / conf[d] - 1) * 100))
+            elif d in flows:
+                continue  # 已核对是真实申购，不动也不告警
             elif code in watch:
                 pending.append((code, d, r))
 
@@ -147,21 +161,33 @@ def month_end_sample(s_daily):
 
 
 def theme_series(df_daily, codes, all_codes):
-    """主题内 ETF 份额合计（日频）。优先严格对齐（所有 ETF 都有数据的日期），
-    对齐点不足 3 个时退化为并集求和并告警。返回 (Series, 缺失代码列表)"""
+    """主题内 ETF 份额合计（日频，固定队列 + 前值填充）。
+
+    队列 = 映射代码中在主题序列首日已有份额的 ETF。之后上市的同题基金
+    不进历史序列——否则它上市当天就会给主题制造一次假跳升，破坏可比性。
+    个别交易日缺失用前值填充（最多 5 天）；连续缺失（清盘/停止披露）则
+    该基金退出合计。返回 (Series, 缺失代码列表)。
+    """
     codes = [c for c in codes if c in set(all_codes)]
     missing = sorted(set(codes) - set(all_codes))
     if not codes:
         return None, missing
     sub = df_daily[df_daily["code"].isin(codes)]
-    cnt = sub.groupby("trade_date")["code"].nunique()
-    full = cnt[cnt == len(codes)].index
-    s = sub[sub["trade_date"].isin(full)].groupby("trade_date")["share"].sum().sort_index()
+    if sub.empty:
+        return None, missing
+    start = sub["trade_date"].min()
+    cohort = sub[sub["trade_date"] == start]["code"].unique().tolist()
+    dropped = sorted(set(codes) - set(cohort))
+    if dropped:
+        log("  队列剔除首日(%s)未上市的 %d 只: %s"
+            % (start.date(), len(dropped),
+               ",".join(dropped[:8]) + ("..." if len(dropped) > 8 else "")))
+    piv = (sub[sub["code"].isin(cohort)]
+           .pivot_table(index="trade_date", columns="code", values="share", aggfunc="last")
+           .sort_index())
+    piv = piv.ffill(limit=5)
+    s = piv.sum(axis=1, min_count=1).dropna()
     if len(s) < 3:
-        s = sub.groupby("trade_date")["share"].sum().sort_index()
-        if not s.empty:
-            log("  提示：代码 %s 完整对齐点不足，已用宽松并集模式" % (",".join(codes),))
-    if s.empty:
         return None, missing
     return s, missing
 
@@ -182,7 +208,8 @@ def main():
     emap = pd.read_csv(MAP_CSV, dtype=str)
     emap["code"] = emap["code"].str.zfill(6)
     # 份额折算前复权：只认 src/splits.csv 白名单（原始数据不动）
-    df = adjust_splits(df, load_splits(), set(emap["code"]))
+    splits, flows = load_splits()
+    df = adjust_splits(df, splits, set(emap["code"]), flows)
     all_codes = set(df["code"])
 
     cats = []

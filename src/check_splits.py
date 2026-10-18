@@ -64,7 +64,10 @@ def main():
     emap = pd.read_csv(B.MAP_CSV, dtype=str)
     emap["code"] = emap["code"].str.zfill(6)
     watch = set(emap["code"])
-    splits = B.load_splits()
+    splits, flows = B.load_splits()
+    known = {c: set(d) for c, d in splits.items()}
+    for c, d in flows.items():
+        known.setdefault(c, set()).update(d)
 
     # 只扫映射标的的候选事件
     cands = []
@@ -73,12 +76,12 @@ def main():
             continue
         ratio = (g["share"] / g["share"].shift(1)).to_numpy()
         dates = g["trade_date"].to_numpy()
-        conf = splits.get(code, {})
+        seen = known.get(code, set())
         for k in range(1, len(g)):
             r = ratio[k]
             if r > B.SPLIT_HI or r < B.SPLIT_LO:
                 d = pd.Timestamp(dates[k]).strftime("%Y-%m-%d")
-                if d not in conf:
+                if d not in seen:
                     cands.append((code, d, r, g["name"].iloc[0] if "name" in g else ""))
 
     if not cands:
@@ -121,21 +124,41 @@ def main():
                  ("%.4f" % tf) if tf else "-", verdict))
 
     confirmed = [r for r in rows if r[7].startswith("折算")]
-    if not confirmed:
-        print("\n没有确认的折算事件。")
+    rejected = [r for r in rows if r[7].startswith("真实申购")]
+    if confirmed:
+        print("\n确认是折算的 %d 起（因子取净值推导值，保留折算日的真实申赎）：" % len(confirmed))
+        for r in confirmed:
+            print("  %s,%s,%.4f,折算,%s" % (r[0], r[2], r[6], r[9]))
+    if rejected:
+        print("\n确认是真实申购的 %d 起（不复权，仅登记以免重复告警）：" % len(rejected))
+        for r in rejected:
+            print("  %s,%s,%.4f,申购,%s" % (r[0], r[2], r[6], r[9]))
+    if not confirmed and not rejected:
+        print("\n没有可判定的候选事件。")
         return
 
-    lines = ["%s,%s,%.4f,%s" % (r[0], r[2], r[6], r[9]) for r in confirmed]
-    print("\n确认是折算的 %d 起（因子取净值推导值，保留折算日的真实申赎），"
-          "可粘贴到 src/splits.csv：" % len(confirmed))
-    for line in lines:
-        print("  " + line)
-
     if args.append:
-        with open(B.SPLITS_CSV, "a", encoding="utf-8") as f:
-            for line in lines:
-                f.write(line + "\n")
-        print("\n已追加到 %s" % B.SPLITS_CSV)
+        add = [(r[0], r[2], r[6], "折算" if r[7].startswith("折算") else "申购", r[9])
+               for r in confirmed + rejected]
+        old = pd.read_csv(B.SPLITS_CSV, dtype=str) if os.path.exists(B.SPLITS_CSV) else pd.DataFrame()
+        have = set()
+        if not old.empty:
+            for _, r in old.iterrows():
+                have.add((str(r["code"]).zfill(6), str(r["date"])))
+        add = [a for a in add if (str(a[0]).zfill(6), str(a[1])) not in have]
+        if not add:
+            print("\n无需追加（都已在 src/splits.csv 中）。")
+            return
+        cols = ["code", "date", "ratio", "verdict", "note"]
+        if old.empty:
+            new = pd.DataFrame(add, columns=cols)
+        else:
+            # 旧行补 verdict 列（默认折算），再追加新行
+            if "verdict" not in old.columns:
+                old["verdict"] = "折算"
+            new = pd.concat([old[cols], pd.DataFrame(add, columns=cols)], ignore_index=True)
+        new.to_csv(B.SPLITS_CSV, index=False, encoding="utf-8")
+        print("\n已追加 %d 行到 %s" % (len(add), B.SPLITS_CSV))
         print("重新运行 python src/build_report.py 即生效。")
 
 
