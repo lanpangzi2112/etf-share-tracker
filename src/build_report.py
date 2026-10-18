@@ -160,13 +160,14 @@ def month_end_sample(s_daily):
     return s_daily.groupby(s_daily.index.to_period("M")).last().sort_index()
 
 
-def theme_series(df_daily, codes, all_codes):
-    """主题内 ETF 份额合计（日频，固定队列 + 前值填充）。
+def theme_series(df_daily, codes, all_codes, grace=20):
+    """主题内 ETF 份额合计（日频，固定队列 + 晚上市标的静默并入）。
 
-    队列 = 映射代码中在主题序列首日已有份额的 ETF。之后上市的同题基金
-    不进历史序列——否则它上市当天就会给主题制造一次假跳升，破坏可比性。
-    个别交易日缺失用前值填充（最多 5 天）；连续缺失（清盘/停止披露）则
-    该基金退出合计。返回 (Series, 缺失代码列表)。
+    队列锚定“序列首日已上市”的同题基金（保证跨年可比，起点即真实市场
+    存量）；之后上市的同题基金从**上市满 grace 个交易日**起并入序列——
+    首发募集期份额暴烈波动，上市即入会制造一次假跳升，等募集稳定后再
+    计入。个别交易日缺失用前值填充（最多 5 天）；连续缺失（清盘/停止
+    披露）则该基金退出合计。返回 (Series, 缺失代码列表)。
     """
     codes = [c for c in codes if c in set(all_codes)]
     missing = sorted(set(codes) - set(all_codes))
@@ -177,14 +178,23 @@ def theme_series(df_daily, codes, all_codes):
         return None, missing
     start = sub["trade_date"].min()
     cohort = sub[sub["trade_date"] == start]["code"].unique().tolist()
-    dropped = sorted(set(codes) - set(cohort))
-    if dropped:
-        log("  队列剔除首日(%s)未上市的 %d 只: %s"
-            % (start.date(), len(dropped),
-               ",".join(dropped[:8]) + ("..." if len(dropped) > 8 else "")))
-    piv = (sub[sub["code"].isin(cohort)]
-           .pivot_table(index="trade_date", columns="code", values="share", aggfunc="last")
+    late = sorted(set(codes) - set(cohort))
+    piv = (sub.pivot_table(index="trade_date", columns="code", values="share",
+                           aggfunc="last")
            .sort_index())
+    # 晚上市标的：上市满 grace 个交易日后才计入（之前的值置 NaN 后由 sum 跳过）
+    dates = piv.index
+    pos = {d: i for i, d in enumerate(dates)}
+    first = sub.groupby("code")["trade_date"].min()
+    for c in late:
+        if c not in piv.columns:
+            continue
+        i0 = pos[first[c]]
+        for d in dates[i0:min(i0 + grace, len(dates))]:
+            piv.loc[d, c] = float("nan")
+    if late:
+        log("  晚上市标的 %d 只，自上市满 %d 交易日起并入: %s"
+            % (len(late), grace, ",".join(late[:8]) + ("..." if len(late) > 8 else "")))
     piv = piv.ffill(limit=5)
     s = piv.sum(axis=1, min_count=1).dropna()
     if len(s) < 3:
