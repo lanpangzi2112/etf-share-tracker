@@ -63,6 +63,43 @@ def load_share_df():
     return df
 
 
+# 单日份额变动超过该倍数即判定为份额折算（拆分/合并）。
+# 现实中 ETF 单日真实申购极少超过 +90%，而折算常是 2:1、3:1、10:1 乃至
+# "净值归一型"的非整数倍（如 3.09:1），因此用观测比例而非取整比例复权。
+SPLIT_HI = 1.9
+SPLIT_LO = 1.0 / 1.9
+
+
+def adjust_splits(df):
+    """份额折算前复权：把折算日之前的份额按实际观测比例乘回去，
+    使序列在"当前份额单位"下连续，避免把拆分当成申购赎回。
+
+    原始 parquet 不改动，复权只发生在生成报告时。返回带新 share 列的副本。
+    """
+    df = df.sort_values(["code", "trade_date"]).copy()
+    df["share"] = df["share"].astype(float)
+    factor = pd.Series(1.0, index=df.index)
+    events = []
+    for code, g in df.groupby("code", sort=False):
+        if len(g) < 3:
+            continue
+        s = g["share"]
+        ratio = (s / s.shift(1)).to_numpy()
+        idx = g.index.to_numpy()
+        dates = g["trade_date"].to_numpy()
+        for k in range(1, len(g)):
+            r = ratio[k]
+            if r > SPLIT_HI or r < SPLIT_LO:
+                factor.loc[idx[:k]] *= r
+                events.append((code, pd.Timestamp(dates[k]).strftime("%Y-%m-%d"), r))
+    if events:
+        df["share"] = df["share"] * factor
+        for code, d, r in events:
+            log("  折算复权 %s %s 比例 %.4f" % (code, d, r))
+    log("份额折算复权：%d 起事件，涉及 %d 只 ETF" % (len(events), len({e[0] for e in events})))
+    return df
+
+
 def month_end_sample(s_daily):
     """日频序列 → 每月最后一个交易日截面"""
     return s_daily.groupby(s_daily.index.to_period("M")).last().sort_index()
@@ -100,6 +137,7 @@ def main():
     df = load_share_df()
     log("数据范围 %s ~ %s，共 %d 行，%d 只 ETF"
         % (df["trade_date"].min().date(), df["trade_date"].max().date(), len(df), df["code"].nunique()))
+    df = adjust_splits(df)  # 份额折算前复权（原始数据不动）
 
     emap = pd.read_csv(MAP_CSV, dtype=str)
     emap["code"] = emap["code"].str.zfill(6)
