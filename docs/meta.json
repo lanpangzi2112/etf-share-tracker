@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-18 22:47:12",
+  "generated_at": "2026-10-19 07:49:47",
   "freq": "month",
   "data_until": "2026-10-16",
   "n_etf": 1779,
@@ -7,67 +7,67 @@
   "summary": [
     {
       "name": "宽基",
-      "n": 5,
-      "leader": "港股股",
-      "leader_chg": 5517.9,
+      "n": 9,
+      "leader": "大盘",
+      "leader_chg": 2781.9,
       "d5": "中小盘",
-      "d5_chg": 7.1
+      "d5_chg": 6.3
     },
     {
       "name": "金融地产",
-      "n": 4,
+      "n": 5,
       "leader": "券商",
-      "leader_chg": 514.6,
-      "d5": "其他非银金融",
-      "d5_chg": -1.4
+      "leader_chg": 870.7,
+      "d5": "金融综合",
+      "d5_chg": -3.2
     },
     {
       "name": "债券",
-      "n": 3,
-      "leader": "短中期利率债",
-      "leader_chg": 12.9,
+      "n": 4,
+      "leader": "信用债",
+      "leader_chg": 164.5,
       "d5": "长期利率债",
-      "d5_chg": 3.9
+      "d5_chg": 4.6
     },
     {
       "name": "科技",
-      "n": 6,
+      "n": 11,
       "leader": "港股跨境科技",
-      "leader_chg": 1645.2,
-      "d5": "军工科技",
-      "d5_chg": 3.6
+      "leader_chg": 5461.6,
+      "d5": "传媒游戏",
+      "d5_chg": 2.6
     },
     {
       "name": "资源",
-      "n": 5,
+      "n": 8,
       "leader": "贵金属",
-      "leader_chg": 350.2,
+      "leader_chg": 437.7,
       "d5": "煤炭",
       "d5_chg": 5.3
     },
     {
       "name": "新能源",
-      "n": 4,
-      "leader": "电池",
-      "leader_chg": 269.0,
+      "n": 6,
+      "leader": "电力",
+      "leader_chg": 395.7,
       "d5": "电池",
-      "d5_chg": -3.6
+      "d5_chg": -3.0
     },
     {
       "name": "医药",
-      "n": 3,
-      "leader": "港医药",
-      "leader_chg": 528.0,
-      "d5": "中药",
-      "d5_chg": -0.9
+      "n": 4,
+      "leader": "医药综合",
+      "leader_chg": 1641.3,
+      "d5": "医药综合",
+      "d5_chg": 1.1
     },
     {
       "name": "消费",
       "n": 4,
       "leader": "消费服务",
-      "leader_chg": 296.8,
-      "d5": "农林牧渔",
-      "d5_chg": -2.4
+      "leader_chg": 327.7,
+      "d5": "白酒",
+      "d5_chg": 0.6
     }
   ]
 }

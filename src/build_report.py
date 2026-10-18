@@ -29,6 +29,10 @@ PALETTE = ["#5b9bd5", "#e8963c", "#4caf50", "#e6c33c", "#9b59b6", "#26a69a",
            "#b5651d", "#666666", "#d4a017", "#8d6e63", "#7fb3e0", "#2e5b8f",
            "#e8836b", "#8fc98f", "#a3a02e", "#555555"]
 
+# 归一化基准的最低规模（亿份）。主题序列起点低于此值时，百分比会被小基数拉爆
+# （短中期利率债起点 0.0168 亿份 → +76653%），故把起点推到首次达到该规模处
+MIN_BASE = 1.0
+
 
 def log(msg):
     print("[build] %s" % msg, flush=True)
@@ -274,6 +278,26 @@ def main():
         vv = _valid(v)
         return vv[-1] if vv else None
 
+    def _trim_base(p1):
+        """小基数主题的起点裁剪。
+
+        序列首日若不足 MIN_BASE 亿份（如短中期利率债起点只有 0.0168 亿份——
+        511360 当时是 168 万份的迷你基金），归一化百分比会被基数拉爆
+        （+76653%），毫无解读价值。此处把起点推到「首次达到 MIN_BASE」的
+        位置，之前留断点；全程未达标的极小主题保持原样。
+        返回 (裁剪后的序列, 归一化基准, 裁剪掉的月数)。
+        """
+        b0 = _first_valid(p1)
+        if b0 is None:
+            return p1, None, 0
+        if b0 >= MIN_BASE:
+            return p1, b0, 0
+        i = next((i for i, v in enumerate(p1)
+                  if v is not None and v >= MIN_BASE), None)
+        if i is None:
+            return p1, b0, 0
+        return [None] * i + p1[i:], p1[i], i
+
     GLOBAL_AXIS = _union_axis(args.freq)
 
     # ---------- 每类面板 ----------
@@ -293,9 +317,13 @@ def main():
             al = _align(s, GLOBAL_AXIS, args.freq)
             xs = [d.strftime("%Y-%m") if args.freq == "month" else d.strftime("%Y-%m-%d")
                   for d in GLOBAL_AXIS]
-            p1 = [_num(v) for v in al.values]
+            raw1 = [_num(v) for v in al.values]
+            p1, b, cut = _trim_base(raw1)
+            if cut:
+                log("  小基数裁剪 %s-%s：起点 %.4g 亿份 < %.0f，序列自 %s 起"
+                    % (c["name"], theme, _first_valid(raw1), MIN_BASE,
+                       GLOBAL_AXIS[cut].strftime("%Y-%m")))
             p1s[theme] = p1
-            b = _first_valid(p1)
             p2s[theme] = [None if v is None else round(v / b * 100, 1)
                           for v in p1] if b else [None] * len(p1)
         c["months"] = xs
