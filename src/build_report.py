@@ -313,10 +313,24 @@ def main():
                                        key=lambda x: -abs(x[1])))
 
         # 分析要素
-        chg2 = sorted(((n, _last_valid(v) - 100) for n, v in p2s.items()), key=lambda x: -x[1])
+        # 长期冠军/失血王按「绝对增量」排序（亿份）——5 年窗口下百分比会被
+        # 小基数主题绑架（0.02→7.97 亿份 = +79600%），绝对增量才反映真实吸金
+        def _delta(n):
+            p = p1s[n]
+            a, b = _first_valid(p), _last_valid(p)
+            return (b - a) if (a is not None and b is not None) else 0.0
+
+        def _delta_pct(n):
+            p = p1s[n]
+            a, b = _first_valid(p), _last_valid(p)
+            return (b / a * 100 - 100) if (a and b is not None) else 0.0
+
+        chg2 = sorted(((n, _delta(n)) for n in p1s), key=lambda x: -x[1])
         chg3 = sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()), key=lambda x: -abs(x[1]))
         c["leader"], c["leader_chg"] = chg2[0]
+        c["leader_pct"] = _delta_pct(c["leader"])
         c["laggard"], c["laggard_chg"] = chg2[-1]
+        c["laggard_pct"] = _delta_pct(c["laggard"])
         c["d5_leader"], c["d5_chg"] = chg3[0]
         c["d5_laggard"], c["d5_lchg"] = chg3[-1]
         lead_p1 = p1s[c["leader"]]
@@ -329,22 +343,22 @@ def main():
         c["drawdown"] = (c["leader_end"] - peak_v) / peak_v * 100 if peak_v else 0.0
 
         start_lbl = xs[0] if xs else "-"
-        lead_dir = "上涨" if c["leader_chg"] >= 0 else "下跌"
         d5_dir = "流入" if c["d5_chg"] >= 0 else "流出"
         shape = ""
         if c["drawdown"] <= -30:
             shape = "，较峰值 %s 回撤 %.0f%%" % (c["leader_peak"], -c["drawdown"])
         c["analysis"] = (
-            "<b>结构：</b>共 %d 个板块。<b>%s</b>是长期主线，自 %s 以来%s <span class='%s'>%+.1f%%</span>%s，"
-            "当前累计份额 %s 亿份；最弱的是 <b>%s</b>（<span class='%s'>%+.1f%%</span>）。<br>"
+            "<b>结构：</b>共 %d 个板块。<b>%s</b>是长期吸金主线，自 %s 以来累计份额净增 "
+            "<span class='%s'>%+.1f 亿份</span>（%+.1f%%）%s，当前合计 %s 亿份；"
+            "失血最多的是 <b>%s</b>（<span class='%s'>%+.1f 亿份</span>，%+.1f%%）。<br>"
             "<b>近5个交易日：</b><b>%s</b>资金%s最明显（<span class='%s'>%+.1f%%</span>），"
             "<b>%s</b>相对走弱（<span class='%s'>%+.1f%%</span>）。<br>"
             "<b>读法：</b>图①看累计规模，图②看相对起点的高低，图③看最新5日动能——三张图结合可判断"
-            "“谁在持续吸金、谁在被赎回”。"
-        ) % (c["n_series"], c["leader"], start_lbl, lead_dir,
-             "up" if c["leader_chg"] >= 0 else "down", c["leader_chg"], shape,
-             "{:,.1f}".format(c["leader_end"]),
-             c["laggard"], "up" if c["laggard_chg"] >= 0 else "down", c["laggard_chg"],
+            "“谁在持续吸金、谁在被赎回”。长期排名按净增份额（亿份）计，避免小基数主题百分比失真。"
+        ) % (c["n_series"], c["leader"], start_lbl,
+             "up" if c["leader_chg"] >= 0 else "down", c["leader_chg"], c["leader_pct"], shape,
+             "{:,.1f}".format(c["leader_end"] if c["leader_end"] else 0),
+             c["laggard"], "up" if c["laggard_chg"] >= 0 else "down", c["laggard_chg"], c["laggard_pct"],
              c["d5_leader"], d5_dir, "up" if c["d5_chg"] >= 0 else "down", c["d5_chg"],
              c["d5_laggard"], "up" if c["d5_lchg"] >= 0 else "down", c["d5_lchg"])
 
@@ -357,17 +371,18 @@ def main():
     ranked5 = sorted(cats, key=lambda c: -abs(c["d5_chg"]))
     last_date = df["trade_date"].max().strftime("%Y-%m-%d")
     lines = ["<b>1. 数据概况。</b>数据截至 %s，覆盖 %d 只 ETF、%d 个类别；"
-             "长期冠军为<b>%s</b>的<b>%s</b>（%+.1f%%），近5日动能最强的是<b>%s</b>的<b>%s</b>（%+.1f%%）。"
+             "长期吸金冠军为<b>%s</b>的<b>%s</b>（净增 %+.1f 亿份，%+.1f%%），"
+             "近5日动能最强的是<b>%s</b>的<b>%s</b>（%+.1f%%）。长期排名按净增份额计，避免小基数主题百分比失真。"
              % (last_date, int(df["code"].nunique()), len(cats),
-                ranked[0]["name"], ranked[0]["leader"], ranked[0]["leader_chg"],
+                ranked[0]["name"], ranked[0]["leader"], ranked[0]["leader_chg"], ranked[0]["leader_pct"],
                 ranked5[0]["name"], ranked5[0]["d5_leader"], ranked5[0]["d5_chg"])]
     for i, c in enumerate(cats, 2):
         extra = ""
         if c["drawdown"] <= -30:
             extra = "，较峰值回撤 %.0f%%" % (-c["drawdown"])
-        lines.append("<b>%d. %s。</b>%s 是长期主线（%+.1f%%）%s；最弱 %s（%+.1f%%）；"
+        lines.append("<b>%d. %s。</b>长期吸金主线 %s（净增 %+.1f 亿份，%+.1f%%）%s；失血最多 %s（%+.1f 亿份）；"
                      "近5日 %s %+.1f%%。"
-                     % (i, c["name"], c["leader"], c["leader_chg"], extra,
+                     % (i, c["name"], c["leader"], c["leader_chg"], c["leader_pct"], extra,
                         c["laggard"], c["laggard_chg"], c["d5_leader"], c["d5_chg"]))
     sumAna = "<br>".join(lines)
 
