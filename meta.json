@@ -1,73 +1,73 @@
 {
-  "generated_at": "2026-10-18 14:14:03",
+  "generated_at": "2026-10-19 13:14:43",
   "freq": "month",
   "data_until": "2026-10-16",
-  "n_etf": 1779,
+  "n_etf": 1782,
   "n_cats": 8,
   "summary": [
     {
       "name": "宽基",
-      "n": 6,
-      "leader": "中小盘",
-      "leader_chg": 821.4,
-      "d5": "大盘",
-      "d5_chg": 16.4
+      "n": 9,
+      "leader": "大盘",
+      "leader_chg": 2743.2,
+      "d5": "中小盘",
+      "d5_chg": 6.5
     },
     {
       "name": "金融地产",
-      "n": 4,
+      "n": 6,
       "leader": "券商",
-      "leader_chg": 232.1,
-      "d5": "银行",
-      "d5_chg": -2.0
+      "leader_chg": 966.6,
+      "d5": "金融综合",
+      "d5_chg": -2.1
     },
     {
       "name": "债券",
-      "n": 3,
-      "leader": "短中期利率债",
-      "leader_chg": 8.0,
-      "d5": "长期利率债",
-      "d5_chg": 7.2
+      "n": 4,
+      "leader": "信用债",
+      "leader_chg": 164.5,
+      "d5": "短中期利率债",
+      "d5_chg": 2.2
     },
     {
       "name": "科技",
-      "n": 6,
-      "leader": "通信",
-      "leader_chg": 414.1,
-      "d5": "军工科技",
-      "d5_chg": 3.6
+      "n": 11,
+      "leader": "港股跨境科技",
+      "leader_chg": 5420.3,
+      "d5": "传媒游戏",
+      "d5_chg": 2.6
     },
     {
       "name": "资源",
-      "n": 5,
-      "leader": "贵金属",
-      "leader_chg": 231.7,
+      "n": 9,
+      "leader": "有色",
+      "leader_chg": 408.2,
       "d5": "煤炭",
       "d5_chg": 5.3
     },
     {
       "name": "新能源",
-      "n": 4,
+      "n": 6,
       "leader": "电力",
-      "leader_chg": 70.7,
+      "leader_chg": 395.7,
       "d5": "电池",
-      "d5_chg": -7.0
+      "d5_chg": -3.0
     },
     {
       "name": "医药",
-      "n": 3,
-      "leader": "创新药",
-      "leader_chg": 322.5,
-      "d5": "中药",
-      "d5_chg": -1.2
+      "n": 4,
+      "leader": "医药综合",
+      "leader_chg": 1625.0,
+      "d5": "医药综合",
+      "d5_chg": 1.1
     },
     {
       "name": "消费",
       "n": 4,
-      "leader": "白酒",
-      "leader_chg": 291.8,
-      "d5": "农林牧渔",
-      "d5_chg": -0.9
+      "leader": "消费服务",
+      "leader_chg": 373.6,
+      "d5": "白酒",
+      "d5_chg": 0.6
     }
   ]
 }
