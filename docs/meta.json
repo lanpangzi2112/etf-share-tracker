@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-19 07:49:47",
+  "generated_at": "2026-10-19 09:07:56",
   "freq": "month",
   "data_until": "2026-10-16",
   "n_etf": 1779,
@@ -9,39 +9,39 @@
       "name": "宽基",
       "n": 9,
       "leader": "大盘",
-      "leader_chg": 2781.9,
+      "leader_chg": 2743.2,
       "d5": "中小盘",
-      "d5_chg": 6.3
+      "d5_chg": 6.5
     },
     {
       "name": "金融地产",
-      "n": 5,
+      "n": 6,
       "leader": "券商",
-      "leader_chg": 870.7,
+      "leader_chg": 966.6,
       "d5": "金融综合",
-      "d5_chg": -3.2
+      "d5_chg": -2.1
     },
     {
       "name": "债券",
       "n": 4,
       "leader": "信用债",
       "leader_chg": 164.5,
-      "d5": "长期利率债",
-      "d5_chg": 4.6
+      "d5": "短中期利率债",
+      "d5_chg": 2.2
     },
     {
       "name": "科技",
       "n": 11,
       "leader": "港股跨境科技",
-      "leader_chg": 5461.6,
+      "leader_chg": 5420.3,
       "d5": "传媒游戏",
       "d5_chg": 2.6
     },
     {
       "name": "资源",
-      "n": 8,
-      "leader": "贵金属",
-      "leader_chg": 437.7,
+      "n": 9,
+      "leader": "有色",
+      "leader_chg": 408.2,
       "d5": "煤炭",
       "d5_chg": 5.3
     },
@@ -57,7 +57,7 @@
       "name": "医药",
       "n": 4,
       "leader": "医药综合",
-      "leader_chg": 1641.3,
+      "leader_chg": 1625.0,
       "d5": "医药综合",
       "d5_chg": 1.1
     },
@@ -65,7 +65,7 @@
       "name": "消费",
       "n": 4,
       "leader": "消费服务",
-      "leader_chg": 327.7,
+      "leader_chg": 373.6,
       "d5": "白酒",
       "d5_chg": 0.6
     }
