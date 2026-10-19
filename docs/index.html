@@ -172,8 +172,9 @@ function initTab(i) {
   const el1 = document.getElementById('t' + i + 'c1');
   const ch1 = echarts.init(el1);
   ch1.setOption({
+    animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: gridCommon,
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v.toLocaleString() }),
+    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v.toLocaleString() }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y1max, interval: c.y1int }),
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
@@ -183,8 +184,9 @@ function initTab(i) {
 
   const ch2 = echarts.init(document.getElementById('t' + i + 'c2'));
   ch2.setOption({
+    animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: gridCommon,
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v + '%' }),
+    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v + '%' }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2int,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
@@ -203,8 +205,9 @@ function initTab(i) {
   const y3 = c.y3;
   const ch3 = echarts.init(document.getElementById('t' + i + 'c3'));
   ch3.setOption({
+    animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: { top: 52, left: 46, right: 22, bottom: 46, containLabel: true },
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v + '%' }),
+    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v + '%' }),
     xAxis: { type: 'category', boundaryGap: false, data: DAYS5, name: '日期',
              nameLocation: 'middle', nameGap: 28, nameTextStyle: { color: '#666', fontSize: 12 },
              axisLabel: { color: '#666', fontSize: 12 } },
@@ -232,7 +235,7 @@ function initSum() {
     legend: { top: 6, left: 'center', textStyle: { fontSize: 12 } },
     grid: { top: 46, left: 60, right: 30, bottom: 30, containLabel: true },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
-               valueFormatter: v => v + '%' },
+               valueFormatter: v => v == null ? '-' : v + '%' },
     xAxis: { type: 'category', data: names, axisLabel: { color: '#666', fontSize: 12 } },
     yAxis: { type: 'value', name: '变化率(%)', nameTextStyle: { color: '#666' },
              axisLabel: { color: '#666', formatter: '{value}%' },
