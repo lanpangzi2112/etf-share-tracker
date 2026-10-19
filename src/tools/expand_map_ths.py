@@ -18,7 +18,17 @@ from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1] / "etf-share-daily"
+def _find_root() -> Path:
+    """向上定位仓库根（etf-share-daily），脚本放在任何子目录都能用。"""
+    p = Path(__file__).resolve().parent
+    while p.parent != p:
+        if p.name == "etf-share-daily":
+            return p
+        p = p.parent
+    raise SystemExit("找不到 etf-share-daily 仓库根")
+
+
+ROOT = _find_root()
 sys.path.insert(0, str(ROOT / "src"))
 import build_report as B  # noqa: E402
 
