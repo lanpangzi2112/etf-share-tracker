@@ -9,7 +9,8 @@ collect.py — 每交易日采集全市场 ETF 份额，落 data/share_YYYY.parq
   3. 东财    ak.fund_etf_spot_em()                 全市场快照（含"最新份额"），兜底
 
 用法：
-  python collect.py                               # 采集今天（非交易日自动退出；今日未更新则回退上一交易日）
+  python collect.py                               # 采集今天（非交易日自动退出；今日未更新则回退上一交易日；
+                                                  #   运行前先扫描并优先补采最近缺失的交易日，最多 3 个）
   python collect.py --date 20261016               # 指定日期
   python collect.py --backfill 20260701:20261016  # 区间回填
   python collect.py --diag                        # 诊断模式：打印各源列名与样本
@@ -48,6 +49,31 @@ def load_trade_dates():
 def prev_trade_day(dates, day):
     prior = [d for d in dates if d < day]
     return prior[-1] if prior else None
+
+
+def existing_data_days():
+    """data/daily 里已入库的日期（YYYYMMDD 字符串集合）"""
+    import glob as _glob
+    out = set()
+    for p in _glob.glob(os.path.join(DAILY_DIR, "share_*.parquet")):
+        b = os.path.basename(p)[len("share_"):-len(".parquet")]
+        if len(b) == 8 and b.isdigit():
+            out.add(b)
+    return out
+
+
+def missing_trade_days(tds, max_back=30, exclude=(), cutoff=None):
+    """截止日（含）之前最近 max_back 个交易日里，数据文件缺失的日期（升序）。
+    用于优先补缺：防止 T 日数据当晚未发布、而 T+1 日先发布时，
+    旧回退逻辑只认上一交易日、把 T 日永久跳过。
+    注意：akshare 交易日历包含未来日期，必须按 cutoff 截断，
+    否则扫描窗口会被未来日期占满，永远摸不到真正的历史缺口。"""
+    if cutoff is None:
+        cutoff = dt.date.today().strftime("%Y%m%d")
+    have = existing_data_days()
+    eligible = [d for d in tds if d <= cutoff and d not in exclude]
+    recent = eligible[-max_back:]
+    return [d for d in recent if d not in have]
 
 
 # ---------------- 数据源 ----------------
@@ -267,6 +293,18 @@ def main():
     if not args.date and day not in tds:
         log("今天 %s 非交易日，退出" % day)
         return
+    # 优先补缺：最近有交易日数据文件缺失时先补最晚的缺口（每次最多 3 个）。
+    # 典型场景：T 日晚窗口数据未发布，而 T+1 日先发布——旧回退逻辑只认上一
+    # 交易日，会把 T 永久跳过。今天自己的数据交给下方正常流程处理。
+    if not args.date:
+        gaps = missing_trade_days(tds, exclude=(day,))
+        for gap in reversed(gaps[-3:]):
+            log("发现数据缺口 %s，优先补采" % gap)
+            g = collect_one(gap, with_em=not args.no_em)
+            if g.empty:
+                log("缺口 %s 暂无数据（交易所未发布），下次运行再试" % gap)
+            else:
+                upsert(g)
     merged = collect_one(day, with_em=not args.no_em)
     if merged.empty and not args.date:
         prev = prev_trade_day(tds, day)
