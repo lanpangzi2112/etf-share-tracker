@@ -9,8 +9,9 @@ collect.py — 每交易日采集全市场 ETF 份额，落 data/share_YYYY.parq
   3. 东财    ak.fund_etf_spot_em()                 全市场快照（含"最新份额"），兜底
 
 用法：
-  python collect.py                               # 采集今天（非交易日自动退出；今日未更新则回退上一交易日；
-                                                  #   运行前先扫描并优先补采最近缺失的交易日，最多 3 个）
+  python collect.py                               # 采集"上一交易日"（不采当天：交易所当日份额晚间才陆续
+                                                  #   发布——上交所约 22:20、深交所约 23:20，晚间跑当天必然不全）
+                                                  #   运行前先扫描并优先补采最近缺失的交易日，最多 3 个
   python collect.py --date 20261016               # 指定日期
   python collect.py --backfill 20260701:20261016  # 区间回填
   python collect.py --diag                        # 诊断模式：打印各源列名与样本
@@ -289,33 +290,50 @@ def main():
         log("回填完成：%d/%d 天入库" % (ok_days, len(days)))
         return
 
-    day = args.date or today
-    if not args.date and day not in tds:
-        log("今天 %s 非交易日，退出" % day)
+    # 显式指定日期：只采该日，不回退、不补缺
+    if args.date:
+        merged = collect_one(args.date, with_em=not args.no_em)
+        if merged.empty:
+            log("未采到任何数据")
+            sys.exit(1)
+        upsert(merged)
+        log("完成，入库 %d 只（%s）" % (len(merged), args.date))
         return
-    # 优先补缺：最近有交易日数据文件缺失时先补最晚的缺口（每次最多 3 个）。
-    # 典型场景：T 日晚窗口数据未发布，而 T+1 日先发布——旧回退逻辑只认上一
-    # 交易日，会把 T 永久跳过。今天自己的数据交给下方正常流程处理。
-    if not args.date:
-        gaps = missing_trade_days(tds, exclude=(day,))
-        for gap in reversed(gaps[-3:]):
-            log("发现数据缺口 %s，优先补采" % gap)
-            g = collect_one(gap, with_em=not args.no_em)
-            if g.empty:
-                log("缺口 %s 暂无数据（交易所未发布），下次运行再试" % gap)
-            else:
-                upsert(g)
-    merged = collect_one(day, with_em=not args.no_em)
-    if merged.empty and not args.date:
-        prev = prev_trade_day(tds, day)
-        if prev:
-            log("今日数据未更新，回退到上一交易日 %s" % prev)
-            merged = collect_one(prev, with_em=not args.no_em)
-    if merged.empty:
-        log("未采到任何数据")
+
+    have = existing_data_days()
+
+    # 1) 优先补缺：最近交易日里数据文件缺失的先补（每次最多 3 个，最晚优先）。
+    #    兜住 cron 被 GitHub 延迟/跳过、以及长假期间漏跑的情况。
+    gaps = missing_trade_days(tds, exclude=(today,))
+    for gap in reversed(gaps[-3:]):
+        log("发现数据缺口 %s，优先补采" % gap)
+        g = collect_one(gap, with_em=not args.no_em)
+        if g.empty:
+            log("缺口 %s 暂无数据（交易所未发布），下次运行再试" % gap)
+        else:
+            upsert(g)
+            have.add(gap)
+
+    # 2) 主目标：固定取"上一交易日"，不取当天。
+    #    交易所当日份额是晚间陆续发布的：上交所约 22:20、深交所约 23:20
+    #    （实测：21:13 两所皆空，22:16 上交所已全量、深交所仍空）。
+    #    因此晚间定时跑"当天"必然为空或残缺；改为取上一交易日，此时两所
+    #    数据已发布近 20 小时，必然齐全，且对 cron 的实际执行时刻完全不敏感
+    #    ——GitHub 把 19:25 延迟到 22:00 还是次日凌晨，结果都一样。
+    target = prev_trade_day(tds, today)
+    if not target:
+        log("交易日历异常：找不到 %s 之前的交易日，退出" % today)
         sys.exit(1)
-    n = upsert(merged)
-    log("完成，入库 %d 只" % (len(merged) if not merged.empty else 0))
+    if target in have:
+        log("上一交易日 %s 已入库，数据已是最新，本次无需采集" % target)
+        return
+    log("目标数据日：上一交易日 %s" % target)
+    merged = collect_one(target, with_em=not args.no_em)
+    if merged.empty:
+        log("上一交易日 %s 未采到数据（交易所异常），下次运行再试" % target)
+        sys.exit(1)
+    upsert(merged)
+    log("完成，入库 %d 只（%s）" % (len(merged), target))
 
 
 if __name__ == "__main__":
