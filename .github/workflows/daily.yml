@@ -2,9 +2,11 @@ name: etf-share-daily
 
 on:
   schedule:
-    # UTC 11:25 = 北京时间 19:25（A股盘后，交易所 T+1 份额已更新）
-    # 刻意避开整点 :00 —— 整点是 GitHub Actions 全局最拥堵的时段，定时会被延迟数小时
-    - cron: '25 11 * * *'
+    # UTC 23:30 = 北京时间次日 07:30。
+    # 采集目标固定为"上一交易日"（见 src/collect.py），此时该日数据在交易所
+    # 已发布 8 小时以上，必然齐全；早上更新，白天看时是最新的。
+    # 避开整点 :00 —— 整点是 GitHub Actions 全局最拥堵的时段，会被延迟数小时。
+    - cron: '30 23 * * *'
   workflow_dispatch:   # 允许在 Actions 页面手动补跑
 
 permissions:
