@@ -330,8 +330,14 @@ def main():
     log("目标数据日：上一交易日 %s" % target)
     merged = collect_one(target, with_em=not args.no_em)
     if merged.empty:
-        log("上一交易日 %s 未采到数据（交易所异常），下次运行再试" % target)
-        sys.exit(1)
+        # 不 exit(1)：采集失败不应阻塞后续的 commit / 构建 / 部署。
+        # CI runner 是临时容器，一旦以失败状态退出，本轮"补缺"采到的数据
+        # 会随容器销毁而丢失，缺口反而越积越多。正常退出让已有数据照常上线。
+        msg = "上一交易日 %s 未采到数据（可能交易所未发布或接口异常），本轮跳过采集，继续用已有数据构建看板" % target
+        log(msg)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print("::warning title=采集未取到数据::%s" % msg)
+        return
     upsert(merged)
     log("完成，入库 %d 只（%s）" % (len(merged), target))
 
