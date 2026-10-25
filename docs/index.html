@@ -30,6 +30,13 @@
   .analysis { margin: 14px 0 6px; padding: 12px 14px; background: #f7f9fc; border-left: 3px solid #5b9bd5;
               border-radius: 4px; font-size: 13px; line-height: 1.9; }
   .analysis b { color: #2e5b8f; }
+  .tt-title { font-weight: 600; margin: 0 0 5px; color: #333; font-size: 12px; }
+  .tt-list { display: flex; flex-direction: column; }
+  .tt-item { display: flex; align-items: center; padding: 2px 5px; border-radius: 3px; line-height: 1.7; }
+  .tt-item.tt-hl { background: #e8f0fb; font-weight: 600; }
+  .tt-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; flex: none; }
+  .tt-name { white-space: nowrap; margin-right: 12px; }
+  .tt-val { margin-left: auto; padding-left: 14px; font-variant-numeric: tabular-nums; }
   .up { color: #d43f3a; font-weight: 600; }
   .down { color: #4caf50; font-weight: 600; }
   table.sum { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0 18px; }
@@ -148,7 +155,8 @@ const baseTooltip = {
   axisPointer: { type: 'line', lineStyle: { color: '#999', type: 'dashed', width: 1 }, snap: true },
   backgroundColor: 'rgba(255,255,255,0.96)', borderColor: '#eee',
   textStyle: { color: '#333', fontSize: 12 },
-  extraCssText: 'box-shadow:0 2px 12px rgba(0,0,0,.12);border-radius:4px;'
+  extraCssText: 'box-shadow:0 2px 12px rgba(0,0,0,.12);border-radius:4px;',
+  enterable: true          // 允许鼠标移入浮层，配合列表项 hover 反向高亮
 };
 const baseLegend = { type: 'scroll', top: 8, left: 'center', itemWidth: 18, itemHeight: 10,
                      itemGap: 12, textStyle: { fontSize: 12, color: '#333' } };
@@ -166,6 +174,76 @@ function mkSeries(store, colors, extra) {
   }, extra || {}));
 }
 
+// ---------- tooltip 高亮联动 ----------
+// 需求：鼠标靠近某条线时，浮层列表里对应那一项要高亮，否则数值一多分不清是谁的。
+// 做法：自定义 tooltip formatter，直接在渲染时算出"离鼠标最近的那一项"并加 .tt-hl。
+//   不监听 mousemove 做状态切换——前三版分别败于 ECharts line 命中区只有线宽、
+//   convertFromPixel 对 category 轴返回字符串导致 NaN、以及事件链路时有时无。
+//   formatter 由 ECharts 在 tooltip 更新时驱动，鼠标一动它就重跑，天然同步，
+//   高亮完全由渲染结果决定，不存在状态错乱。
+//   反向：鼠标移到浮层列表项上 → 高亮对应的线（浮层 enterable）。
+
+// 鼠标在图表内的像素坐标，由 mousemove 记录（只存坐标，不做任何计算）
+let TT_MOUSE = null;
+
+function mkTooltipFmt(fmtValue, chart) {
+  return function (params) {
+    if (!params || !params.length) return '';
+    // 在"当前 tooltip 列出的这些项"里找离鼠标最近的一条
+    let hlSi = -1, bestD = Infinity;
+    if (TT_MOUSE) {
+      for (let i = 0; i < params.length; i++) {
+        const p = params[i];
+        if (p.value == null || isNaN(p.value)) continue;
+        try {
+          const px = chart.convertToPixel({ seriesIndex: p.seriesIndex }, [p.dataIndex, p.value]);
+          const d = Math.sqrt((px[0] - TT_MOUSE[0]) * (px[0] - TT_MOUSE[0]) +
+                              (px[1] - TT_MOUSE[1]) * (px[1] - TT_MOUSE[1]));
+          if (d < bestD) { bestD = d; hlSi = p.seriesIndex; }
+        } catch (err) { /* 单个 series 换算失败就跳过，不影响其他项 */ }
+      }
+    }
+    let h = '<div class="tt-title">' + (params[0].axisValue != null ? params[0].axisValue : '') +
+            '</div><div class="tt-list">';
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i], v = p.value;
+      const txt = (v == null || isNaN(v)) ? '-' : fmtValue(v);
+      const cls = (p.seriesIndex === hlSi) ? 'tt-item tt-hl' : 'tt-item';
+      h += '<div class="' + cls + '" data-si="' + p.seriesIndex + '">' +
+           '<span class="tt-dot" style="background:' + p.color + '"></span>' +
+           '<span class="tt-name">' + p.seriesName + '</span>' +
+           '<span class="tt-val">' + txt + '</span></div>';
+    }
+    return h + '</div>';
+  };
+}
+
+function bindTipHighlight(chart) {
+  const dom = chart.getDom();
+
+  // 只记录鼠标坐标（相对图表容器），高亮计算全部交给 tooltip formatter
+  dom.addEventListener('mousemove', function (e) {
+    const r = dom.getBoundingClientRect();
+    TT_MOUSE = [e.clientX - r.left, e.clientY - r.top];
+  });
+  dom.addEventListener('mouseleave', function () { TT_MOUSE = null; });
+  chart.on('globalout', function () { TT_MOUSE = null; });
+
+  // 反向：鼠标移到浮层列表项上 → 高亮对应的线
+  dom.addEventListener('mouseover', function (e) {
+    const it = e.target && e.target.closest ? e.target.closest('.tt-item') : null;
+    if (it && dom.contains(it)) {
+      chart.dispatchAction({ type: 'highlight', seriesIndex: +it.getAttribute('data-si') });
+    }
+  });
+  dom.addEventListener('mouseout', function (e) {
+    const it = e.target && e.target.closest ? e.target.closest('.tt-item') : null;
+    if (it && dom.contains(it)) {
+      chart.dispatchAction({ type: 'downplay', seriesIndex: +it.getAttribute('data-si') });
+    }
+  });
+}
+
 function initTab(i) {
   const c = DATA.cats[i], list = [];
   const colors = c.order.map(n => [n, c.colors[n]]);
@@ -174,7 +252,7 @@ function initTab(i) {
   ch1.setOption({
     animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: gridCommon,
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v.toLocaleString() }),
+    tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v.toLocaleString(), ch1) }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y1max, interval: c.y1int }),
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
@@ -186,7 +264,7 @@ function initTab(i) {
   ch2.setOption({
     animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: gridCommon,
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v + '%' }),
+    tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v + '%', ch2) }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2int,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
@@ -207,7 +285,7 @@ function initTab(i) {
   ch3.setOption({
     animation: true, animationDurationUpdate: 0,
     legend: baseLegend, grid: { top: 52, left: 46, right: 22, bottom: 46, containLabel: true },
-    tooltip: Object.assign({}, baseTooltip, { valueFormatter: v => v == null ? '-' : v + '%' }),
+    tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v + '%', ch3) }),
     xAxis: { type: 'category', boundaryGap: false, data: DAYS5, name: '日期',
              nameLocation: 'middle', nameGap: 28, nameTextStyle: { color: '#666', fontSize: 12 },
              axisLabel: { color: '#666', fontSize: 12 } },
@@ -225,6 +303,7 @@ function initTab(i) {
   document.getElementById('t' + i + 'n3').textContent = '近5自然日区间变化 TOP3: ' + c.top3_p3;
   document.getElementById('t' + i + 'ana').innerHTML = c.analysis;
   chartsByTab[i] = list;
+  list.forEach(bindTipHighlight);
 }
 
 function initSum() {
@@ -234,8 +313,8 @@ function initSum() {
   ch.setOption({
     legend: { top: 6, left: 'center', textStyle: { fontSize: 12 } },
     grid: { top: 46, left: 60, right: 30, bottom: 30, containLabel: true },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
-               valueFormatter: v => v == null ? '-' : v + '%' },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, enterable: true,
+               formatter: mkTooltipFmt(v => v == null ? '-' : v + '%', ch) },
     xAxis: { type: 'category', data: names, axisLabel: { color: '#666', fontSize: 12 } },
     yAxis: { type: 'value', name: '变化率(%)', nameTextStyle: { color: '#666' },
              axisLabel: { color: '#666', formatter: '{value}%' },
@@ -252,6 +331,7 @@ function initSum() {
     ]
   });
   chartsByTab['sum'] = [ch];
+  bindTipHighlight(ch);
 
   let rows = '<tr><th>类别</th><th>板块数</th><th>长期冠军</th><th>长期变化</th><th>近5日最强</th><th>近5日变化</th></tr>';
   s.forEach(x => {
