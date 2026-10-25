@@ -567,8 +567,7 @@ DATA.cats.forEach((c, i) => {
   p.innerHTML =
     '<div class="panel-title">① 份额变化（亿份，累计）</div><div id="t' + i + 'c1" class="chart h400"></div>' +
     '<div class="panel-title">② 长期份额变化率（起始日=100%）</div>' +
-    '<div class="band-legend"><span><i class="sw" style="background:rgba(232,150,60,.25)"></i>上涨区（高于100%）</span>' +
-    '<span><i class="sw" style="background:rgba(120,120,120,.12)"></i>下跌区（低于100%）</span><span>- - 基准线（100%）</span></div>' +
+    '<div class="band-legend"><span>- - 基准线（100%）</span></div>' +
     '<div id="t' + i + 'c2" class="chart h400"></div><div class="note" id="t' + i + 'n2"></div>' +
     '<div class="panel-title">③ 近5自然日内交易日份额变化率（区间首日=100%）</div>' +
     '<div class="band-legend"><span><i class="sw" style="background:rgba(76,175,80,.18)"></i>上涨区（高于100%）</span>' +
@@ -713,10 +712,7 @@ function initTab(i) {
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
     series: mkSeries(c.panel2, colors, {
       markLine: { symbol: 'none', lineStyle: { color: '#999', type: 'dashed', width: 1 },
-                  label: { show: false }, data: [{ yAxis: 100 }] },
-      markArea: { silent: true, data: [
-        [{ yAxis: c.y2max, itemStyle: { color: 'rgba(232,150,60,.07)' } }, { yAxis: 100 }],
-        [{ yAxis: 100, itemStyle: { color: 'rgba(120,120,120,.05)' } }, { yAxis: 0 }]] }
+                  label: { show: false }, data: [{ yAxis: 100 }] }
     })
   });
   list.push(ch2);
