@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-25 15:57:19",
+  "generated_at": "2026-10-25 17:29:19",
   "freq": "month",
   "data_until": "2026-10-23",
   "n_etf": 1787,
@@ -7,7 +7,7 @@
   "summary": [
     {
       "name": "宽基",
-      "n": 9,
+      "n": 8,
       "leader": "大盘",
       "leader_chg": 3026.1,
       "d5": "中小盘",
