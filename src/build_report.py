@@ -345,8 +345,9 @@ def main():
                     % (c["name"], theme, _first_valid(raw1), MIN_BASE,
                        GLOBAL_AXIS[cut].strftime("%Y-%m")))
             p1s[theme] = p1
-            p2s[theme] = [None if v is None else round(v / b * 100, 1)
-                          for v in p1] if b else [None] * len(p1)
+            b2 = _last_valid(p1)
+            p2s[theme] = [None if v is None else round(v / b2 * 100, 1)
+                          for v in p1] if b2 else [None] * len(p1)
         c["months"] = xs
         c["panel1"] = p1s
         c["panel2"] = p2s
@@ -366,7 +367,10 @@ def main():
         c["y3int"] = step3
 
         # TOP3（按变化幅度绝对值排序，与原看板口径一致；取各序列最后有效值）
-        c["top3_p2"] = fmt_top3(sorted(((n, _last_valid(v) - 100) for n, v in p2s.items()),
+        def _p2_chg(n):
+            x = _first_valid(p2s[n])
+            return (100.0 / x - 1) * 100 if (x and x > 0) else 0.0
+        c["top3_p2"] = fmt_top3(sorted(((n, _p2_chg(n)) for n in p2s),
                                        key=lambda x: -abs(x[1])))
         c["top3_p3"] = fmt_top3(sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()),
                                        key=lambda x: -abs(x[1])))
@@ -412,7 +416,7 @@ def main():
             "失血最多的是 <b>%s</b>（<span class='%s'>%+.1f 亿份</span>，%+.1f%%）。<br>"
             "<b>近5个交易日：</b><b>%s</b>资金%s最明显（<span class='%s'>%+.1f%%</span>），"
             "<b>%s</b>相对走弱（<span class='%s'>%+.1f%%</span>）。<br>"
-            "<b>读法：</b>图①看累计规模，图②看相对起点的高低，图③看最新5日动能——三张图结合可判断"
+            "<b>读法：</b>图①看累计规模，图②看相对最新份额的长期位置（右端对齐100%%，越低＝累计增长越多），图③看最新5日动能——三张图结合可判断"
             "“谁在持续吸金、谁在被赎回”。长期排名按净增份额（亿份）计，避免小基数主题百分比失真。"
         ) % (c["n_series"], c["leader"], start_lbl,
              "up" if c["leader_chg"] >= 0 else "down", c["leader_chg"], c["leader_pct"], shape,
@@ -543,7 +547,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
 <div class="wrap">
   <h1>ETF份额变化全景分析</h1>
-  <div class="sub">8 大类 × 3 张图：累计份额变化（亿份）/ 长期变化率（起始日=100%）/ 近5自然日变化率 · 鼠标或手指滑动查看数值</div>
+  <div class="sub">8 大类 × 3 张图：累计份额变化（亿份）/ 长期变化率（最新=100%）/ 近5自然日变化率 · 鼠标或手指滑动查看数值</div>
   <div class="tab-bar" id="tabBar"></div>
   <div id="pages"></div>
 </div>
@@ -566,8 +570,9 @@ DATA.cats.forEach((c, i) => {
   p.className = 'tab-page'; p.id = 'page-' + i;
   p.innerHTML =
     '<div class="panel-title">① 份额变化（亿份，累计）</div><div id="t' + i + 'c1" class="chart h400"></div>' +
-    '<div class="panel-title">② 长期份额变化率（起始日=100%）</div>' +
-    '<div class="band-legend"><span>- - 基准线（100%）</span></div>' +
+    '<div class="panel-title">② 长期份额变化率（最新=100%）</div>' +
+    '<div class="band-legend"><span>- - 基准线（100%＝最新份额）</span>' +
+    '<span>线在100%下方＝较当前增长，上方＝较当前缩水</span></div>' +
     '<div id="t' + i + 'c2" class="chart h400"></div><div class="note" id="t' + i + 'n2"></div>' +
     '<div class="panel-title">③ 近5自然日内交易日份额变化率（区间首日=100%）</div>' +
     '<div class="band-legend"><span><i class="sw" style="background:rgba(76,175,80,.18)"></i>上涨区（高于100%）</span>' +
@@ -716,7 +721,7 @@ function initTab(i) {
     })
   });
   list.push(ch2);
-  document.getElementById('t' + i + 'n2').textContent = '长期变化 TOP3: ' + c.top3_p2;
+  document.getElementById('t' + i + 'n2').textContent = '长期变化 TOP3: ' + c.top3_p2 + '（数值＝该日份额相对最新日占比，最新日=100%）';
 
   const y3 = c.y3;
   const ch3 = echarts.init(document.getElementById('t' + i + 'c3'));
