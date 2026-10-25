@@ -6,7 +6,7 @@ collect.py — 每交易日采集全市场 ETF 份额，落 data/share_YYYY.parq
 数据源（均免费、无需 key）：
   1. 上交所  ak.fund_etf_scale_sse(date)          官方份额，支持历史日期
   2. 深交所  ak.fund_scale_daily_szse(start, end) 官方日频份额
-  3. 东财    ak.fund_etf_spot_em()                 全市场快照（含"最新份额"），兜底
+（东财快照源 2026-10-25 移除：历史累计采集 0 行，纯冗余且单位自适应逻辑有缺陷）
 
 用法：
   python collect.py                               # 采集"上一交易日"（不采当天：交易所当日份额晚间才陆续
@@ -132,24 +132,9 @@ def fetch_szse(start, end):  # YYYYMMDD
     return out
 
 
-def fetch_em(day8):  # 东财快照，day8: YYYYMMDD（快照的业务日期）
-    import akshare as ak
-    df = ak.fund_etf_spot_em()
-    if df is None or df.empty:
-        return pd.DataFrame()
-    share = pd.to_numeric(df["最新份额"], errors="coerce")
-    unit = 1e8 if share.max(skipna=True) > 1e11 else 1e4  # 份 or 万份 → 亿份
-    size = (pd.to_numeric(df["总市值"], errors="coerce") / 1e8) if "总市值" in df.columns else None
-    close = pd.to_numeric(df["最新价"], errors="coerce") if "最新价" in df.columns else None
-    out = pd.DataFrame({
-        "trade_date": pd.to_datetime(day8).strftime("%Y-%m-%d"),
-        "code": df["代码"].astype(str).str.zfill(6),
-        "name": df["名称"].astype(str),
-        "share": share / unit,
-        "size": size, "nav": None, "close": close,
-        "source": "em",
-    })
-    return out
+# 东财快照源已移除（2026-10-25）：该源历史累计采集 0 行（接口长期不可用），
+# 纯冗余；且其单位自适应用 share.max() 判断，可能被单只超大份额 ETF 误导。
+# 份额数据现在只取上交所 + 深交所两个官方源。
 
 
 # ---------------- 存储 ----------------
@@ -199,7 +184,7 @@ def retry(fn, tries=3, pause=4, what=""):
     return pd.DataFrame()
 
 
-def collect_one(day8: str, with_em: bool = True) -> pd.DataFrame:
+def collect_one(day8: str) -> pd.DataFrame:
     """采集单个交易日 YYYYMMDD，返回合并后的长表"""
     frames = []
     s = retry(lambda: fetch_sse(day8), what="上交所 ")
@@ -208,18 +193,14 @@ def collect_one(day8: str, with_em: bool = True) -> pd.DataFrame:
     z = retry(lambda: fetch_szse(day8, day8), what="深交所 ")
     log("深交所 %s: %d 只" % (day8, len(z)))
     frames.append(z)
-    if with_em:
-        e_ = retry(lambda: fetch_em(day8), tries=2, what="东财 ")
-        log("东财快照: %d 只" % len(e_))
-        frames.append(e_)
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
         return pd.DataFrame()
     merged = pd.concat(frames, ignore_index=True)
     merged = merged.dropna(subset=["share"])
     merged = merged[merged["share"] > 0]
-    # 同日同 code 优先级：sse > szse > em
-    prio = {"sse": 0, "szse": 1, "em": 2}
+    # 同日同 code 优先级：sse > szse
+    prio = {"sse": 0, "szse": 1}
     merged["_p"] = merged["source"].map(prio)
     merged = (merged.sort_values("_p")
                     .drop_duplicates(subset=["trade_date", "code"], keep="first")
@@ -231,7 +212,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="单个交易日 YYYYMMDD")
     ap.add_argument("--backfill", help="区间回填 YYYYMMDD:YYYYMMDD")
-    ap.add_argument("--no-em", action="store_true", help="不用东财快照")
     ap.add_argument("--use-proxy", action="store_true", help="保留系统代理（默认禁代理直连）")
     ap.add_argument("--diag", action="store_true", help="诊断：打印各源列名与样本")
     args = ap.parse_args()
@@ -250,11 +230,6 @@ def main():
                 print("== %s ==\n列: %s\n%s\n" % (fn, list(df.columns), df.head(3).to_string()))
             except Exception as e:
                 print("== %s == 失败: %s\n" % (fn, e))
-        try:
-            df = ak.fund_etf_spot_em()
-            print("== fund_etf_spot_em ==\n列: %s\n%s\n" % (list(df.columns), df.head(3).to_string()))
-        except Exception as e:
-            print("== fund_etf_spot_em == 失败: %s" % e)
         return
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -292,7 +267,7 @@ def main():
 
     # 显式指定日期：只采该日，不回退、不补缺
     if args.date:
-        merged = collect_one(args.date, with_em=not args.no_em)
+        merged = collect_one(args.date)
         if merged.empty:
             log("未采到任何数据")
             sys.exit(1)
@@ -307,7 +282,7 @@ def main():
     gaps = missing_trade_days(tds, exclude=(today,))
     for gap in reversed(gaps[-3:]):
         log("发现数据缺口 %s，优先补采" % gap)
-        g = collect_one(gap, with_em=not args.no_em)
+        g = collect_one(gap)
         if g.empty:
             log("缺口 %s 暂无数据（交易所未发布），下次运行再试" % gap)
         else:
@@ -328,7 +303,7 @@ def main():
         log("上一交易日 %s 已入库，数据已是最新，本次无需采集" % target)
         return
     log("目标数据日：上一交易日 %s" % target)
-    merged = collect_one(target, with_em=not args.no_em)
+    merged = collect_one(target)
     if merged.empty:
         # 不 exit(1)：采集失败不应阻塞后续的 commit / 构建 / 部署。
         # CI runner 是临时容器，一旦以失败状态退出，本轮"补缺"采到的数据
