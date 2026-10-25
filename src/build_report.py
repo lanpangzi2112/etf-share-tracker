@@ -72,6 +72,11 @@ def load_share_df():
 # src/splits.csv 白名单里登记过的事件复权，其余候选只告警不改数。
 SPLIT_HI = 1.9
 SPLIT_LO = 1.0 / 1.9
+# 新基金/小基数基金的份额跳变几乎都是真实申购，不按"疑似折算"告警——
+# 单一份额倍率无法区分申购与拆分，必须用净值确认（见 check_splits.py）。
+# 实例：158037 上市第 6 个交易日单日 +394.6%，实为建仓期大额申购（净值无反向跳变）。
+NEW_ETF_DAYS = 60      # 首次有数据起 60 个自然日内视为新基金
+SMALL_BASE = 3.0       # 跳变前份额低于 3 亿份视为小基数
 SPLITS_CSV = os.path.join(ROOT, "src", "splits.csv")
 
 
@@ -108,7 +113,9 @@ def adjust_splits(df, splits, watch_codes=None, known_flows=None):
     确认再登记。已登记为"申购"的事件静默跳过（不再告警）。
 
     watch_codes 内的代码若出现未登记候选，会逐条告警（其余代码只计数），
-    避免日志被非映射标的刷屏。
+    避免日志被非映射标的刷屏。但新基金（首次有数据 < 60 天）与跳变前份额
+    < 3 亿份的小基数基金不告警——这两类的倍数跳变几乎都是真实申购，
+    单一份额倍率无法区分二者，须用净值确认（见 check_splits.py）。
 
     原始 parquet 不改动，复权只发生在生成报告时。
     """
@@ -126,6 +133,7 @@ def adjust_splits(df, splits, watch_codes=None, known_flows=None):
         ratio = (s / s.shift(1)).to_numpy()
         idx = g.index.to_numpy()
         dates = g["trade_date"].to_numpy()
+        first_day = pd.Timestamp(dates[0])   # 该 code 首次有数据的日期
         conf = splits.get(code, {})
         flows = known_flows.get(code, {})
         for k in range(1, len(g)):
@@ -144,6 +152,19 @@ def adjust_splits(df, splits, watch_codes=None, known_flows=None):
             elif d in flows:
                 continue  # 已核对是真实申购，不动也不告警
             elif code in watch:
+                # 新基金建仓期、小基数基金的倍数跳变几乎都是申购，不是折算。
+                # 份额倍率单独无法区分二者（须净值确认），对这两类直接不告警，
+                # 免得每次构建都刷一条无法处理的误报。
+                age_days = (pd.Timestamp(dates[k]) - first_day).days
+                prev_share = s.iloc[k - 1]
+                if age_days < NEW_ETF_DAYS:
+                    log("  [跳过告警] %s %s 倍率 %.4f：新基金（仅有数据第 %d 天），"
+                        "建仓期申购波动，不按折算处理" % (code, d, r, age_days))
+                    continue
+                if prev_share < SMALL_BASE:
+                    log("  [跳过告警] %s %s 倍率 %.4f：跳变前仅 %.2f 亿份（小基数），"
+                        "申购波动天然放大，不按折算处理" % (code, d, r, prev_share))
+                    continue
                 pending.append((code, d, r))
 
     if applied:
