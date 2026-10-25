@@ -125,7 +125,8 @@ DATA.cats.forEach((c, i) => {
   p.innerHTML =
     '<div class="panel-title">① 份额变化（亿份，累计）</div><div id="t' + i + 'c1" class="chart h400"></div>' +
     '<div class="panel-title">② 长期份额变化率（起始日=100%）</div>' +
-    '<div class="band-legend"><span>- - 基准线（100%）</span></div>' +
+    '<div class="band-legend"><span>- - 基准线（100%）</span>' +
+    '<span>纵轴为对数刻度：等距 = 等倍数增长</span></div>' +
     '<div id="t' + i + 'c2" class="chart h400"></div><div class="note" id="t' + i + 'n2"></div>' +
     '<div class="panel-title">③ 近5自然日内交易日份额变化率（区间首日=100%）</div>' +
     '<div class="band-legend"><span><i class="sw" style="background:rgba(76,175,80,.18)"></i>上涨区（高于100%）</span>' +
@@ -265,7 +266,11 @@ function initTab(i) {
     legend: baseLegend, grid: gridCommon,
     tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v + '%', ch2) }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
-    yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2int,
+    // 纵轴用对数刻度：本图各主题起点份额差异极大（1.9 亿 ~ 500 亿），
+    // 线性轴下小基数主题的变化率（如港医药 +91926%）会把 y 轴拉到天上去，
+    // 同板块其他主题被压成贴地直线。对数轴下等距=等倍数，各主题可直接比较。
+    // 实测图②全局最小值为 36.7（科技-通信），min 取 30 留余量；log 轴不支持 0。
+    yAxis: Object.assign({}, yAxisCommon, { type: 'log', min: 30, max: c.y2max,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
     dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
     series: mkSeries(c.panel2, colors, {
