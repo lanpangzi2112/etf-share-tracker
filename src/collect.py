@@ -18,11 +18,29 @@ collect.py — 每交易日采集全市场 ETF 份额，落 data/share_YYYY.parq
 """
 import argparse
 import datetime as dt
+import json
 import os
+import socket
 import sys
 import time
 
 import pandas as pd
+import requests
+
+# 交易所接口偶发挂起：akshare 内部的 requests.get 没有 timeout，上交所一旦不响应
+# 会一直卡到 CI 超时。这里统一注入默认超时（socket 层 + requests 层双保险）。
+# 2026-10-31 事故：10-30 上交所 923 只全部漏采，就是请求失败后静默返回空表所致。
+HTTP_TIMEOUT = 30
+socket.setdefaulttimeout(HTTP_TIMEOUT)
+_orig_request = requests.api.request
+
+
+def _request_with_timeout(*args, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return _orig_request(*args, **kwargs)
+
+
+requests.api.request = _request_with_timeout
 
 # 默认禁代理直连（交易所站点直连最稳；GitHub Actions 本就没有代理）。
 # 如你的网络必须走代理才能访问外网，加 --use-proxy
@@ -63,18 +81,46 @@ def existing_data_days():
     return out
 
 
+# 两所都必须有数据才算完整：上交所 ~923 只、深交所 ~768 只。
+# 只凭其中一所写出的文件是残缺的，绝不能被当作"已入库"。
+REQUIRED_SOURCES = ("sse", "szse")
+
+
+def day_is_complete(day8):
+    """该交易日的数据文件是否两所齐全。不存在也返回 False。"""
+    path = os.path.join(DAILY_DIR, "share_%s.parquet" % day8)
+    if not os.path.exists(path):
+        return False
+    try:
+        df = pd.read_parquet(path, columns=["source"])
+    except Exception:
+        return False
+    if df.empty:
+        return False
+    return all(s in set(df["source"].dropna()) for s in REQUIRED_SOURCES)
+
+
 def missing_trade_days(tds, max_back=30, exclude=(), cutoff=None):
-    """截止日（含）之前最近 max_back 个交易日里，数据文件缺失的日期（升序）。
+    """截止日（含）之前最近 max_back 个交易日里，数据文件缺失或不完整的日期（升序）。
     用于优先补缺：防止 T 日数据当晚未发布、而 T+1 日先发布时，
     旧回退逻辑只认上一交易日、把 T 日永久跳过。
     注意：akshare 交易日历包含未来日期，必须按 cutoff 截断，
-    否则扫描窗口会被未来日期占满，永远摸不到真正的历史缺口。"""
+    否则扫描窗口会被未来日期占满，永远摸不到真正的历史缺口。
+    2026-10-31 起：不再只看文件是否存在，还校验数据是否两所齐全
+    ——残缺文件（如只有深交所）会被重新判定为缺口并重采。"""
     if cutoff is None:
         cutoff = dt.date.today().strftime("%Y%m%d")
     have = existing_data_days()
     eligible = [d for d in tds if d <= cutoff and d not in exclude]
     recent = eligible[-max_back:]
-    return [d for d in recent if d not in have]
+    out = []
+    for d in recent:
+        if d not in have:
+            out.append(d)
+        elif not day_is_complete(d):
+            log("发现残缺数据 %s（缺上交所或深交所），列入补采" % d)
+            out.append(d)
+    return out
 
 
 # ---------------- 数据源 ----------------
@@ -163,39 +209,52 @@ def upsert(new: pd.DataFrame) -> int:
 
 
 # ---------------- 主流程 ----------------
-import requests as _rq
-
-_NET_ERRS = (_rq.exceptions.ConnectionError, _rq.exceptions.Timeout,
-             _rq.exceptions.ChunkedEncodingError, TimeoutError, ConnectionError)
+# 可重试的异常：网络层全部异常 + 接口返回非 JSON（交易所维护页/限流页）。
+# 2026-10-31 事故：akshare 在 r.json() 上抛的 JSONDecodeError 不在原重试范围内，
+# 导致一次失败就彻底放弃，直接返回空表。
+_NET_ERRS = (
+    requests.exceptions.RequestException,   # 含 ConnectionError/Timeout/HTTPError/ChunkedEncodingError
+    json.JSONDecodeError,                   # 接口返回 HTML 而非 JSON
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
 
 
 def retry(fn, tries=3, pause=4, what=""):
-    """网络错误重试；数据型错误（如交易所当日无数据）直接放弃返回空"""
+    """网络/接口异常重试；数据型错误（如交易所无该日数据）直接放弃返回空"""
     for i in range(tries):
         try:
             return fn()
         except Exception as e:
             if isinstance(e, _NET_ERRS) and i < tries - 1:
-                log("%s网络错误，第 %d 次重试: %s" % (what, i + 1, str(e)[:100]))
-                time.sleep(pause)
+                log("%s请求异常，第 %d/%d 次重试: %s"
+                    % (what, i + 1, tries - 1, str(e)[:100]))
+                time.sleep(pause * (i + 1))
                 continue
-            log("%s失败: %s" % (what, str(e)[:150]))
+            log("%s失败: %s: %s" % (what, type(e).__name__, str(e)[:150]))
             return pd.DataFrame()
     return pd.DataFrame()
 
 
-def collect_one(day8: str) -> pd.DataFrame:
-    """采集单个交易日 YYYYMMDD，返回合并后的长表"""
-    frames = []
+def collect_one(day8: str):
+    """采集单个交易日 YYYYMMDD。
+
+    返回 (merged_df, counts)。counts 记录两所各取到多少只，
+    调用方必须用它判断数据是否完整——**只有单一交易所的结果不能当作成功**。
+    """
+    frames, counts = [], {}
     s = retry(lambda: fetch_sse(day8), what="上交所 ")
+    counts["sse"] = len(s)
     log("上交所 %s: %d 只" % (day8, len(s)))
     frames.append(s)
     z = retry(lambda: fetch_szse(day8, day8), what="深交所 ")
+    counts["szse"] = len(z)
     log("深交所 %s: %d 只" % (day8, len(z)))
     frames.append(z)
     frames = [f for f in frames if f is not None and not f.empty]
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(), counts
     merged = pd.concat(frames, ignore_index=True)
     merged = merged.dropna(subset=["share"])
     merged = merged[merged["share"] > 0]
@@ -205,7 +264,18 @@ def collect_one(day8: str) -> pd.DataFrame:
     merged = (merged.sort_values("_p")
                     .drop_duplicates(subset=["trade_date", "code"], keep="first")
                     .drop(columns="_p"))
-    return merged
+    return merged, counts
+
+
+def missing_sources(counts):
+    """返回缺失的数据源列表；空列表表示两所齐全。"""
+    return [s for s in REQUIRED_SOURCES if counts.get(s, 0) == 0]
+
+
+def warn(msg):
+    log(msg)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("::warning title=采集数据不完整::%s" % msg)
 
 
 def main():
@@ -213,6 +283,8 @@ def main():
     ap.add_argument("--date", help="单个交易日 YYYYMMDD")
     ap.add_argument("--backfill", help="区间回填 YYYYMMDD:YYYYMMDD")
     ap.add_argument("--use-proxy", action="store_true", help="保留系统代理（默认禁代理直连）")
+    ap.add_argument("--force", action="store_true",
+                    help="配合 --date：即使只有单一交易所数据也强制写入（默认拒绝残缺数据）")
     ap.add_argument("--diag", action="store_true", help="诊断：打印各源列名与样本")
     args = ap.parse_args()
 
@@ -255,6 +327,12 @@ def main():
                 merged = (merged.sort_values("_p")
                                 .drop_duplicates(subset=["trade_date", "code"], keep="first")
                                 .drop(columns="_p"))
+                # 回填多为历史日期，交易所早期覆盖可能不全：缺一所只告警不拦截，
+                # 但必须留痕，避免又把残缺文件当成完整数据。
+                miss = [n for n, f in (("sse", s), ("szse", z))
+                        if f is None or f.empty]
+                if miss:
+                    log("⚠ %s 缺少数据源 %s，按残缺写入（回填模式）" % (d, ",".join(miss)))
                 upsert(merged)
                 ok_days += 1
             else:
@@ -267,9 +345,16 @@ def main():
 
     # 显式指定日期：只采该日，不回退、不补缺
     if args.date:
-        merged = collect_one(args.date)
+        merged, counts = collect_one(args.date)
+        miss = missing_sources(counts)
         if merged.empty:
-            log("未采到任何数据")
+            log("未采到任何数据（%s）" % args.date)
+            sys.exit(1)
+        if miss and not args.force:
+            # 残缺不落盘：否则会被 existing_data_days 当作已入库，缺口永久留存
+            warn("%s 缺少数据源 %s（上交所%d只/深交所%d只），未写入；"
+                 "可用 --force 强制写入残缺数据"
+                 % (args.date, ",".join(miss), counts.get("sse", 0), counts.get("szse", 0)))
             sys.exit(1)
         upsert(merged)
         log("完成，入库 %d 只（%s）" % (len(merged), args.date))
@@ -277,14 +362,18 @@ def main():
 
     have = existing_data_days()
 
-    # 1) 优先补缺：最近交易日里数据文件缺失的先补（每次最多 3 个，最晚优先）。
+    # 1) 优先补缺：最近交易日里数据文件缺失/残缺的先补（每次最多 3 个，最晚优先）。
     #    兜住 cron 被 GitHub 延迟/跳过、以及长假期间漏跑的情况。
     gaps = missing_trade_days(tds, exclude=(today,))
     for gap in reversed(gaps[-3:]):
         log("发现数据缺口 %s，优先补采" % gap)
-        g = collect_one(gap)
+        g, gcounts = collect_one(gap)
+        gmiss = missing_sources(gcounts)
         if g.empty:
             log("缺口 %s 暂无数据（交易所未发布），下次运行再试" % gap)
+        elif gmiss:
+            warn("缺口 %s 仍缺数据源 %s（上交所%d只/深交所%d只），本轮不写入，下次重试"
+                 % (gap, ",".join(gmiss), gcounts.get("sse", 0), gcounts.get("szse", 0)))
         else:
             upsert(g)
             have.add(gap)
@@ -299,11 +388,12 @@ def main():
     if not target:
         log("交易日历异常：找不到 %s 之前的交易日，退出" % today)
         sys.exit(1)
-    if target in have:
-        log("上一交易日 %s 已入库，数据已是最新，本次无需采集" % target)
+    if target in have and day_is_complete(target):
+        log("上一交易日 %s 已入库且两所齐全，本次无需采集" % target)
         return
     log("目标数据日：上一交易日 %s" % target)
-    merged = collect_one(target)
+    merged, counts = collect_one(target)
+    miss = missing_sources(counts)
     if merged.empty:
         # 不 exit(1)：采集失败不应阻塞后续的 commit / 构建 / 部署。
         # CI runner 是临时容器，一旦以失败状态退出，本轮"补缺"采到的数据
@@ -312,6 +402,13 @@ def main():
         log(msg)
         if os.environ.get("GITHUB_ACTIONS") == "true":
             print("::warning title=采集未取到数据::%s" % msg)
+        return
+    if miss:
+        # 关键闸门：只有一所数据时不落盘。否则残缺文件会被当作已入库，
+        # 缺口扫描（missing_trade_days）再也不会重试，缺口永久留存。
+        warn("上一交易日 %s 数据不完整，缺数据源 %s（上交所%d只/深交所%d只），"
+             "本轮不写入，下次运行自动重试"
+             % (target, ",".join(miss), counts.get("sse", 0), counts.get("szse", 0)))
         return
     upsert(merged)
     log("完成，入库 %d 只（%s）" % (len(merged), target))
