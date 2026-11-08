@@ -565,9 +565,11 @@ DATA.cats.forEach((c, i) => {
   const p = document.createElement('div');
   p.className = 'tab-page'; p.id = 'page-' + i;
   p.innerHTML =
-    '<div class="panel-title">① 份额变化（亿份，累计）</div><div id="t' + i + 'c1" class="chart h400"></div>' +
+    '<div class="panel-title">① 份额变化（亿份，累计）</div>' +
+    '<div class="band-legend"><span>右侧滑条拖动手柄＝只缩放纵轴（横轴不变） · 双击图表复位</span></div>' +
+    '<div id="t' + i + 'c1" class="chart h400"></div>' +
     '<div class="panel-title">② 长期份额变化率（起始日=100%）</div>' +
-    '<div class="band-legend"><span>- - 基准线（100%）</span></div>' +
+    '<div class="band-legend"><span>- - 基准线（100%）</span><span>右侧滑条缩放纵轴 · 双击复位</span></div>' +
     '<div id="t' + i + 'c2" class="chart h400"></div><div class="note" id="t' + i + 'n2"></div>' +
     '<div class="panel-title">③ 近5自然日内交易日份额变化率（区间首日=100%）</div>' +
     '<div class="band-legend"><span><i class="sw" style="background:rgba(76,175,80,.18)"></i>上涨区（高于100%）</span>' +
@@ -601,7 +603,7 @@ const baseTooltip = {
 };
 const baseLegend = { type: 'scroll', top: 8, left: 'center', itemWidth: 18, itemHeight: 10,
                      itemGap: 12, textStyle: { fontSize: 12, color: '#333' } };
-const gridCommon = { top: 52, left: 46, right: 22, bottom: 42, containLabel: true };
+const gridCommon = { top: 52, left: 46, right: 44, bottom: 42, containLabel: true };
 const xAxisCommon = { type: 'category', boundaryGap: false,
                       axisLabel: { color: '#666', fontSize: 11, interval: 'auto', rotate: 35 } };
 const yAxisCommon = { type: 'value', splitLine: { lineStyle: { color: '#f0f0f0' } },
@@ -685,6 +687,52 @@ function bindTipHighlight(chart) {
   });
 }
 
+// ---------- 纵轴独立缩放 ----------
+// 需求：把右下角挤成一堆的曲线放大看清，但不改时间轴；横轴仍保持滚轮缩放。
+// 做法：给纵轴单独挂一个 slider 型 dataZoom（拖手柄压缩纵轴范围），横轴的 inside
+// 滚轮缩放保持不变，两者互不干扰。
+//   - 纵轴固定 interval 在缩放后会失灵（压到 0~1500 时只剩 0 和 1500 两个刻度），
+//     故在 datazoom 事件里按当前真实区间重算步长；
+//   - 双击图表 = 横轴 + 纵轴一起复位到初始范围。
+function niceStep(span, n) {
+  if (!(span > 0)) return null;
+  const raw = span / n;
+  const e = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) {
+    let s = m * e;
+    if (s >= raw) return (s >= 1 && s !== Math.floor(s)) ? Math.ceil(s) : s;
+  }
+  return 10 * e;
+}
+
+function ySlider(yMax) {
+  return { type: 'slider', yAxisIndex: 0, right: 8, width: 12, top: 56, bottom: 46,
+           filterMode: 'none', showDetail: false, brushSelect: false,
+           handleSize: 14, borderColor: '#ddd', fillerColor: 'rgba(91,155,213,.10)',
+           startValue: 0, endValue: yMax };
+}
+
+function bindYZoom(chart, yMax, yInt) {
+  let lastIv = yInt;
+  chart.on('datazoom', function () {
+    try {
+      const ext = chart.getModel().getComponent('yAxis', 0).axis.scale.getExtent();
+      const iv = niceStep(ext[1] - ext[0], 5);
+      if (iv && iv !== lastIv) {
+        lastIv = iv;
+        chart.setOption({ yAxis: { interval: iv } });
+      }
+    } catch (err) { /* 读不到区间就保持原刻度 */ }
+  });
+  chart.getDom().addEventListener('dblclick', function () {
+    lastIv = yInt;
+    chart.setOption({
+      dataZoom: [{ start: 0, end: 100 }, { startValue: 0, endValue: yMax }],
+      yAxis: { interval: yInt }
+    });
+  });
+}
+
 function initTab(i) {
   const c = DATA.cats[i], list = [];
   const colors = c.order.map(n => [n, c.colors[n]]);
@@ -696,9 +744,10 @@ function initTab(i) {
     tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v.toLocaleString(), ch1) }),
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y1max, interval: c.y1int }),
-    dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
+    dataZoom: [{ type: 'inside', xAxisIndex: 0, rangeMode: ['value', 'value'] }, ySlider(c.y1max)],
     series: mkSeries(c.panel1, colors)
   });
+  bindYZoom(ch1, c.y1max, c.y1int);
   list.push(ch1);
 
   const ch2 = echarts.init(document.getElementById('t' + i + 'c2'));
@@ -709,12 +758,13 @@ function initTab(i) {
     xAxis: Object.assign({}, xAxisCommon, { data: MONTHS }),
     yAxis: Object.assign({}, yAxisCommon, { min: 0, max: c.y2max, interval: c.y2int,
                                             axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
-    dataZoom: [{ type: 'inside', rangeMode: ['value', 'value'] }],
+    dataZoom: [{ type: 'inside', xAxisIndex: 0, rangeMode: ['value', 'value'] }, ySlider(c.y2max)],
     series: mkSeries(c.panel2, colors, {
       markLine: { symbol: 'none', lineStyle: { color: '#999', type: 'dashed', width: 1 },
                   label: { show: false }, data: [{ yAxis: 100 }] }
     })
   });
+  bindYZoom(ch2, c.y2max, c.y2int);
   list.push(ch2);
   document.getElementById('t' + i + 'n2').textContent = '长期变化 TOP3: ' + c.top3_p2;
 
