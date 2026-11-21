@@ -453,7 +453,7 @@ def main():
             "<b>近5个交易日：</b><b>%s</b>资金%s最明显（<span class='%s'>%+.1f%%</span>），"
             "<b>%s</b>相对走弱（<span class='%s'>%+.1f%%</span>）。<br>"
             "<b>读法：</b>图①看累计规模（亿份），图②看相对成立起点的长期成长，图③看调仓动向"
-            "（X=上期、Y=当期份额变化率；右上持续吸金，右下转为流入，左上转为流出，左下持续失血），"
+            "（X=上期、Y=当期份额变化率；右上持续吸金，左上转为流入，右下转为流出，左下持续失血），"
             "窗口可切 5/20/60/120 日。长期排名按净增份额（亿份）计，避免小基数主题百分比失真。"
         ) % (c["n_series"], c["leader"], start_lbl,
              "up" if c["leader_chg"] >= 0 else "down", c["leader_chg"], c["leader_pct"], shape,
@@ -625,8 +625,8 @@ DATA.cats.forEach((c, i) => {
     '<div class="panel-title">③ 调仓动向：上期 vs 当期份额变化率（四象限）</div>' +
     '<div class="win-bar" id="t' + i + 'w3"></div>' +
     '<div class="band-legend"><span><i class="sw" style="background:rgba(212,63,58,.20)"></i>持续吸金（右上）</span>' +
-    '<span><i class="sw" style="background:rgba(91,155,213,.20)"></i>转为流入（右下）</span>' +
-    '<span><i class="sw" style="background:rgba(232,150,60,.20)"></i>转为流出（左上）</span>' +
+    '<span><i class="sw" style="background:rgba(232,150,60,.20)"></i>转为流入（左上）</span>' +
+    '<span><i class="sw" style="background:rgba(91,155,213,.20)"></i>转为流出（右下）</span>' +
     '<span><i class="sw" style="background:rgba(76,175,80,.20)"></i>持续失血（左下）</span>' +
     '<span>气泡大小＝净申赎（亿份）</span></div>' +
     '<div id="t' + i + 'c3" class="chart h400"></div><div class="note" id="t' + i + 'n3"></div>' +
