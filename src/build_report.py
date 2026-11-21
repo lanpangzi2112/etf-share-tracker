@@ -33,6 +33,14 @@ PALETTE = ["#5b9bd5", "#e8963c", "#4caf50", "#e6c33c", "#9b59b6", "#26a69a",
 # （短中期利率债起点 0.0168 亿份 → +76653%），故把起点推到首次达到该规模处
 MIN_BASE = 1.0
 
+# 图③（调仓动向）的可用窗口：交易日数。每个窗口回答的问题不同：
+#   5   短线异动（一周内的申赎脉冲）
+#   20  月度调仓（一个月内主力进出）
+#   60  季度趋势（一个季度的主线切换）
+#   120 半年主线（跨越半年的板块轮动）
+WINDOWS = (5, 20, 60, 120)
+DEFAULT_WIN = 20
+
 
 def log(msg):
     print("[build] %s" % msg, flush=True)
@@ -322,16 +330,37 @@ def main():
     GLOBAL_AXIS = _union_axis(args.freq)
 
     # ---------- 每类面板 ----------
+    # 图③的日频公共轴：所有主题都用同一串交易日定位窗口，保证同期可比。
+    # 若各主题各用 s.tail(N)，缺日或晚上市会让窗口起止日错位，60/120 日尤其明显。
+    DAILY_AXIS = pd.DatetimeIndex(sorted(df["trade_date"].unique()))
     for c in cats:
-        # 图3 用日频最近 5 个交易日
-        d5_all = []
-        for theme, s in c["themes"]:
-            tail = s.tail(5)
-            base = float(tail.iloc[0])
-            p3 = [round(float(v) / base * 100, 1) for v in tail.values]
-            d5_all.append((theme, p3, [d.strftime("%m-%d") for d in tail.index]))
-        n5 = max(len(x[2]) for x in d5_all)
-        c["days5"] = next(x[2] for x in d5_all if len(x[2]) == n5)
+        # 图③：调仓动向。对每个窗口 N，取「当期 N 日」与「上期 N 日」的份额
+        # 变化率，构成四象限（X=上期，Y=当期），净增份额决定气泡大小。
+        flow, flow_lbl = {}, {}
+        for N in WINDOWS:
+            pts = {}
+            for theme, s in c["themes"]:
+                al = s.reindex(DAILY_AXIS)
+                cur_i, base_i, prev_i = len(DAILY_AXIS) - 1, len(DAILY_AXIS) - 1 - N, len(DAILY_AXIS) - 1 - 2 * N
+                if prev_i < 0:
+                    continue
+                cur, mid, prv = al.iloc[cur_i], al.iloc[base_i], al.iloc[prev_i]
+                if pd.isna(cur) or pd.isna(mid) or pd.isna(prv) or not cur or not mid or not prv:
+                    continue
+                pts[theme] = {
+                    "y": round((float(cur) / float(mid) - 1) * 100, 2),   # 当期变化率
+                    "x": round((float(mid) / float(prv) - 1) * 100, 2),   # 上期变化率
+                    "net": round(float(cur) - float(mid), 2),            # 当期净增（亿份）
+                    "now": round(float(cur), 1),
+                }
+            flow[N] = pts
+            flow_lbl[N] = {
+                "prev": DAILY_AXIS[prev_i].strftime("%Y-%m-%d") if prev_i >= 0 else "-",
+                "mid": DAILY_AXIS[len(DAILY_AXIS) - 1 - N].strftime("%Y-%m-%d"),
+                "cur": DAILY_AXIS[-1].strftime("%Y-%m-%d"),
+            }
+        c["flow"] = flow
+        c["flowLabel"] = flow_lbl
 
         xs, p1s, p2s = [], {}, {}
         for theme, s in c["themes"]:
@@ -350,26 +379,37 @@ def main():
         c["months"] = xs
         c["panel1"] = p1s
         c["panel2"] = p2s
-        c["panel3"] = {theme: p3 for theme, p3, _ in d5_all}
+
+        # 图③轴：四象限必须对称。长窗口会出现小基数主题的极端爆发
+        # （如 120 日窗口卫星互联网上期 +610%、电网设备 +935%），若按 max 定轴，
+        # 其余主题会全部挤在原点。这里按分位数定轴，超界点由前端「贴边 + 三角标记」
+        # 呈现，数值不变、tooltip 仍给真实值。
+        def _flow_axis(N):
+            vals = sorted(abs(p[k]) for p in flow[N].values() for k in ("x", "y"))
+            if not vals:
+                return [-1, 1], 1
+            mx = vals[-1]
+            second = vals[-2] if len(vals) > 1 else mx
+            # 只有「最大值远超次大值」才算极端离群；正常波动一律按 max 定轴，不贴边
+            ref = second * 1.6 if mx > second * 2.5 else mx
+            lim, step = nice_axis(max(ref, 0.5), 4, 1.15)
+            return [-max(lim, 1), max(lim, 1)], step
+
+        c["flowAxis"] = {N: _flow_axis(N) for N in WINDOWS}
+        c["flowNetMax"] = {N: max([abs(p["net"]) for p in flow[N].values()] or [1]) for N in WINDOWS}
 
         # 轴范围（上限与刻度步长都取整：max = step × n，刻度全是整数）
         peak1 = max(max(_valid(v)) for v in p1s.values())
         peak2 = max(max(_valid(v)) for v in p2s.values())
-        lo3 = min(min(v) for v in c["panel3"].values())
-        hi3 = max(max(v) for v in c["panel3"].values())
         c["y1max"], c["y1int"] = nice_axis(peak1, 7, 1.12)
         c["y2max"], c["y2int"] = nice_axis(peak2, 5, 1.06, floor_at=110)
-        lo3v = min(math.floor(lo3 * 0.98), 98)
-        span = max(hi3 * 1.02, 102) - lo3v
-        _, step3 = nice_axis(span, 5, 1.0)
-        c["y3"] = [lo3v, lo3v + step3 * 5]
-        c["y3int"] = step3
 
         # TOP3（按变化幅度绝对值排序，与原看板口径一致；取各序列最后有效值）
         c["top3_p2"] = fmt_top3(sorted(((n, _last_valid(v) - 100) for n, v in p2s.items()),
                                        key=lambda x: -abs(x[1])))
-        c["top3_p3"] = fmt_top3(sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()),
-                                       key=lambda x: -abs(x[1])))
+        # 图③各窗口的 TOP3（按当期变化率绝对值）
+        c["top3_flow"] = {N: fmt_top3(sorted(((n, p["y"]) for n, p in flow[N].items()),
+                                            key=lambda x: -abs(x[1]))) for N in WINDOWS}
 
         # 分析要素
         # 长期冠军/失血王按「绝对增量」排序（亿份）——5 年窗口下百分比会被
@@ -385,13 +425,13 @@ def main():
             return (b / a * 100 - 100) if (a and b is not None) else 0.0
 
         chg2 = sorted(((n, _delta(n)) for n in p1s), key=lambda x: -x[1])
-        chg3 = sorted(((n, v[-1] - 100) for n, v in c["panel3"].items()), key=lambda x: -abs(x[1]))
+        chg5 = sorted(((n, p["y"]) for n, p in flow[5].items()), key=lambda x: -abs(x[1]))
         c["leader"], c["leader_chg"] = chg2[0]
         c["leader_pct"] = _delta_pct(c["leader"])
         c["laggard"], c["laggard_chg"] = chg2[-1]
         c["laggard_pct"] = _delta_pct(c["laggard"])
-        c["d5_leader"], c["d5_chg"] = chg3[0]
-        c["d5_laggard"], c["d5_lchg"] = chg3[-1]
+        c["d5_leader"], c["d5_chg"] = chg5[0] if chg5 else ("-", 0.0)
+        c["d5_laggard"], c["d5_lchg"] = chg5[-1] if chg5 else ("-", 0.0)
         lead_p1 = p1s[c["leader"]]
         peak_i = max((i for i, v in enumerate(lead_p1) if v is not None),
                      key=lambda i: lead_p1[i], default=0)
@@ -412,8 +452,9 @@ def main():
             "失血最多的是 <b>%s</b>（<span class='%s'>%+.1f 亿份</span>，%+.1f%%）。<br>"
             "<b>近5个交易日：</b><b>%s</b>资金%s最明显（<span class='%s'>%+.1f%%</span>），"
             "<b>%s</b>相对走弱（<span class='%s'>%+.1f%%</span>）。<br>"
-            "<b>读法：</b>图①看累计规模，图②看相对起点的高低，图③看最新5日动能——三张图结合可判断"
-            "“谁在持续吸金、谁在被赎回”。长期排名按净增份额（亿份）计，避免小基数主题百分比失真。"
+            "<b>读法：</b>图①看累计规模（亿份），图②看相对成立起点的长期成长，图③看调仓动向"
+            "（X=上期、Y=当期份额变化率；右上持续吸金，右下转为流入，左上转为流出，左下持续失血），"
+            "窗口可切 5/20/60/120 日。长期排名按净增份额（亿份）计，避免小基数主题百分比失真。"
         ) % (c["n_series"], c["leader"], start_lbl,
              "up" if c["leader_chg"] >= 0 else "down", c["leader_chg"], c["leader_pct"], shape,
              "{:,.1f}".format(c["leader_end"] if c["leader_end"] else 0),
@@ -447,12 +488,14 @@ def main():
 
     # ---------- 组装 DATA（与页面 JS 约定一致） ----------
     DATA = {
-        "months": cats[0]["months"], "days5": cats[0]["days5"],
+        "months": cats[0]["months"],
+        "windows": list(WINDOWS), "defaultWin": DEFAULT_WIN,
         "cats": [{"key": c["name"], "name": c["name"], "y1max": c["y1max"],
                   "y1int": c["y1int"], "y2max": c["y2max"], "y2int": c["y2int"],
-                  "y3": c["y3"], "y3int": c["y3int"],
-                  "top3_p2": c["top3_p2"], "top3_p3": c["top3_p3"],
-                  "panel1": c["panel1"], "panel2": c["panel2"], "panel3": c["panel3"],
+                  "top3_p2": c["top3_p2"], "top3_flow": c["top3_flow"],
+                  "panel1": c["panel1"], "panel2": c["panel2"],
+                  "flow": c["flow"], "flowAxis": c["flowAxis"],
+                  "flowNetMax": c["flowNetMax"], "flowLabel": c["flowLabel"],
                   "colors": c["colors"], "order": c["order"],
                   "analysis": c["analysis"]} for c in cats],
         "summary": summary, "sumAna": sumAna,
@@ -506,6 +549,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   .tab-bar button { border: 1px solid #ddd; background: #fafafa; color: #555; font-size: 13px;
                     padding: 6px 14px; border-radius: 16px; cursor: pointer; }
   .tab-bar button.active { background: #5b9bd5; border-color: #5b9bd5; color: #fff; font-weight: 600; }
+  .win-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px; align-items: center; }
+  .win-bar .win-label { font-size: 12px; color: #888; margin-right: 2px; }
+  .win-bar button { border: 1px solid #ddd; background: #fafafa; color: #555; font-size: 12px;
+                    padding: 3px 11px; border-radius: 12px; cursor: pointer; }
+  .win-bar button.active { background: #5b9bd5; border-color: #5b9bd5; color: #fff; font-weight: 600; }
+  .win-bar .win-hint { font-size: 12px; color: #aaa; margin-left: 6px; }
   .tab-page { display: none; }
   .tab-page.active { display: block; }
   .panel-title { font-size: 15px; font-weight: 600; margin: 20px 0 4px; }
@@ -553,7 +602,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script>__ECHARTS__</script>
 <script>
 const DATA = __DATA__;
-const MONTHS = DATA.months, DAYS5 = DATA.days5;
+const MONTHS = DATA.months;
 const chartsByTab = {};
 let curTab = 0;
 
@@ -573,10 +622,14 @@ DATA.cats.forEach((c, i) => {
     '<div class="panel-title">② 长期份额变化率（起始日=100%）</div>' +
     '<div class="band-legend"><span>- - 基准线（100%）</span><span>右侧滑条缩放纵轴 · 双击复位</span></div>' +
     '<div id="t' + i + 'c2" class="chart h400"></div><div class="note" id="t' + i + 'n2"></div>' +
-    '<div class="panel-title">③ 近5自然日内交易日份额变化率（区间首日=100%）</div>' +
-    '<div class="band-legend"><span><i class="sw" style="background:rgba(76,175,80,.18)"></i>上涨区（高于100%）</span>' +
-    '<span><i class="sw" style="background:rgba(91,155,213,.15)"></i>下跌区（低于100%）</span><span>- - 基准线（100%）</span></div>' +
-    '<div id="t' + i + 'c3" class="chart h320"></div><div class="note" id="t' + i + 'n3"></div>' +
+    '<div class="panel-title">③ 调仓动向：上期 vs 当期份额变化率（四象限）</div>' +
+    '<div class="win-bar" id="t' + i + 'w3"></div>' +
+    '<div class="band-legend"><span><i class="sw" style="background:rgba(212,63,58,.20)"></i>持续吸金（右上）</span>' +
+    '<span><i class="sw" style="background:rgba(91,155,213,.20)"></i>转为流入（右下）</span>' +
+    '<span><i class="sw" style="background:rgba(232,150,60,.20)"></i>转为流出（左上）</span>' +
+    '<span><i class="sw" style="background:rgba(76,175,80,.20)"></i>持续失血（左下）</span>' +
+    '<span>气泡大小＝净申赎（亿份）</span></div>' +
+    '<div id="t' + i + 'c3" class="chart h400"></div><div class="note" id="t' + i + 'n3"></div>' +
     '<div class="analysis" id="t' + i + 'ana"></div>';
   pages.appendChild(p);
 });
@@ -770,27 +823,103 @@ function initTab(i) {
   list.push(ch2);
   document.getElementById('t' + i + 'n2').textContent = '长期变化 TOP3: ' + c.top3_p2;
 
-  const y3 = c.y3;
+  // 图③：调仓动向四象限（X=上期窗口变化率，Y=当期窗口变化率）
   const ch3 = echarts.init(document.getElementById('t' + i + 'c3'));
-  ch3.setOption({
-    animation: true, animationDurationUpdate: 0,
-    legend: baseLegend, grid: { top: 52, left: 46, right: 22, bottom: 46, containLabel: true },
-    tooltip: Object.assign({}, baseTooltip, { formatter: mkTooltipFmt(v => v == null ? '-' : v + '%', ch3) }),
-    xAxis: { type: 'category', boundaryGap: false, data: DAYS5, name: '日期',
-             nameLocation: 'middle', nameGap: 28, nameTextStyle: { color: '#666', fontSize: 12 },
-             axisLabel: { color: '#666', fontSize: 12 } },
-    yAxis: Object.assign({}, yAxisCommon, { min: y3[0], max: y3[1], interval: c.y3int,
-                                            axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' } }),
-    series: mkSeries(c.panel3, colors, {
-      markLine: { symbol: 'none', lineStyle: { color: '#999', type: 'dashed', width: 1 },
-                  label: { show: false }, data: [{ yAxis: 100 }] },
-      markArea: { silent: true, data: [
-        [{ yAxis: y3[1], itemStyle: { color: 'rgba(76,175,80,.10)' } }, { yAxis: 100 }],
-        [{ yAxis: 100, itemStyle: { color: 'rgba(91,155,213,.08)' } }, { yAxis: y3[0] }]] }
-    })
+  function flowOption(win) {
+    const axv = c.flowAxis[win] || [[-1, 1], 1], ax = axv[0], step = axv[1];
+    const nmax = c.flowNetMax[win] || 1, pts = c.flow[win] || {};
+    const lb = c.flowLabel[win] || {};
+    const fmtPct = v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+    const lim = ax[1], edge = lim * 0.97;
+    const series = c.order.filter(n => pts[n]).map((n, k) => {
+      const p = pts[n];
+      const sz = Math.max(8, Math.min(26, 8 + 16 * Math.sqrt(Math.abs(p.net) / nmax)));
+      const out = Math.abs(p.x) > lim || Math.abs(p.y) > lim;
+      const cx = Math.max(-edge, Math.min(edge, p.x));
+      const cy = Math.max(-edge, Math.min(edge, p.y));
+      const s = {
+        name: n, type: 'scatter', data: [[cx, cy, p.net, p.now]], symbolSize: sz, z: 3,
+        symbol: out ? 'triangle' : 'circle',
+        itemStyle: { color: c.colors[n], opacity: .9, borderColor: '#fff', borderWidth: 1 },
+        label: { show: true, position: 'right', fontSize: 11, color: '#666',
+                 formatter: out ? n + ' ▲' : n },
+        labelLayout: { moveOverlap: 'shiftY' },
+        emphasis: { scale: 1.3, label: { fontWeight: 'bold', color: '#333' } }
+      };
+      if (k === 0) {                       // 象限底色与零轴线只画一次
+        s.markArea = { silent: true, data: [
+          [{ xAxis: 0, yAxis: 0, itemStyle: { color: 'rgba(212,63,58,.07)' } }, { xAxis: ax[1], yAxis: ax[1] }],
+          [{ xAxis: ax[0], yAxis: 0, itemStyle: { color: 'rgba(232,150,60,.09)' } }, { xAxis: 0, yAxis: ax[1] }],
+          [{ xAxis: 0, yAxis: ax[0], itemStyle: { color: 'rgba(91,155,213,.09)' } }, { xAxis: ax[1], yAxis: 0 }],
+          [{ xAxis: ax[0], yAxis: ax[0], itemStyle: { color: 'rgba(76,175,80,.07)' } }, { xAxis: 0, yAxis: 0 }]
+        ] };
+        s.markLine = { silent: true, symbol: 'none', lineStyle: { color: '#bbb', width: 1 },
+                       label: { show: false }, data: [{ xAxis: 0 }, { yAxis: 0 }] };
+      }
+      return s;
+    });
+    return {
+      animation: true, animationDurationUpdate: 0,
+      legend: { type: 'scroll', bottom: 0, left: 'center', itemWidth: 18, itemHeight: 10,
+                itemGap: 12, textStyle: { fontSize: 12, color: '#333' } },
+      grid: { top: 34, left: 64, right: 34, bottom: 76, containLabel: true },
+      tooltip: {
+        trigger: 'item', backgroundColor: 'rgba(255,255,255,0.96)', borderColor: '#eee',
+        textStyle: { color: '#333', fontSize: 12 },
+        extraCssText: 'box-shadow:0 2px 12px rgba(0,0,0,.12);border-radius:4px;',
+        formatter: function (o) {
+          const p = pts[o.name]; if (!p) return o.name;
+          return '<div class="tt-title">' + o.name + '</div><div class="tt-list">' +
+            '<div class="tt-item"><span class="tt-name">当期 ' + (lb.mid || '') + '→' + (lb.cur || '') + '</span>' +
+            '<span class="tt-val" style="color:' + (p.y >= 0 ? '#d43f3a' : '#4caf50') + '">' + fmtPct(p.y) + '</span></div>' +
+            '<div class="tt-item"><span class="tt-name">上期 ' + (lb.prev || '') + '→' + (lb.mid || '') + '</span>' +
+            '<span class="tt-val" style="color:' + (p.x >= 0 ? '#d43f3a' : '#4caf50') + '">' + fmtPct(p.x) + '</span></div>' +
+            '<div class="tt-item"><span class="tt-name">净申赎</span><span class="tt-val" style="color:' +
+            (p.net >= 0 ? '#d43f3a' : '#4caf50') + '">' + (p.net >= 0 ? '+' : '') + p.net.toFixed(1) + ' 亿份</span></div>' +
+            '<div class="tt-item"><span class="tt-name">期末合计</span><span class="tt-val">' + p.now + ' 亿份</span></div></div>' +
+            ((Math.abs(p.x) > lim || Math.abs(p.y) > lim)
+              ? '<div class="tt-item"><span class="tt-name" style="color:#c88">▲ 坐标已贴边，数值为真实值</span></div>' : '');
+        }
+      },
+      xAxis: { type: 'value', min: ax[0], max: ax[1], interval: step,
+               name: '上期 ' + win + ' 日变化率', nameLocation: 'middle', nameGap: 32,
+               nameTextStyle: { color: '#666', fontSize: 12 },
+               axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' },
+               splitLine: { lineStyle: { color: '#f2f2f2' } } },
+      yAxis: { type: 'value', min: ax[0], max: ax[1], interval: step,
+               name: '当期 ' + win + ' 日变化率', nameLocation: 'middle', nameGap: 48,
+               nameTextStyle: { color: '#666', fontSize: 12 },
+               axisLabel: { color: '#666', fontSize: 11, formatter: '{value}%' },
+               splitLine: { lineStyle: { color: '#f2f2f2' } } },
+      series: series
+    };
+  }
+  const wbar = document.getElementById('t' + i + 'w3');
+  wbar.innerHTML = '';                  // 重复 init 时避免按钮叠加
+  const wlbl = document.createElement('span');
+  wlbl.className = 'win-label'; wlbl.textContent = '窗口：';
+  wbar.appendChild(wlbl);
+  const hints = { 5: '短线异动', 20: '月度调仓', 60: '季度趋势', 120: '半年主线' };
+  const wbtns = {};
+  DATA.windows.forEach(w => {
+    const b = document.createElement('button');
+    b.textContent = w + '日'; b.dataset.win = w; b.title = hints[w] || '';
+    b.onclick = () => setWin(w);
+    wbar.appendChild(b); wbtns[w] = b;
   });
+  const whint = document.createElement('span');
+  whint.className = 'win-hint';
+  wbar.appendChild(whint);
+  function setWin(w) {
+    ch3.setOption(flowOption(w), true);
+    Object.keys(wbtns).forEach(k => wbtns[k].classList.toggle('active', +k === w));
+    whint.textContent = '（' + (hints[w] || '') + '）';
+    const lb = c.flowLabel[w] || {};
+    document.getElementById('t' + i + 'n3').textContent =
+      '当期变化 TOP3: ' + (c.top3_flow[w] || '-') + ' · 区间 ' + (lb.mid || '') + ' → ' + (lb.cur || '');
+  }
+  setWin(DATA.defaultWin);
   list.push(ch3);
-  document.getElementById('t' + i + 'n3').textContent = '近5自然日区间变化 TOP3: ' + c.top3_p3;
   document.getElementById('t' + i + 'ana').innerHTML = c.analysis;
   chartsByTab[i] = list;
   list.forEach(bindTipHighlight);
