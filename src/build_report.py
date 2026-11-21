@@ -478,7 +478,9 @@ def emit(DATA, echarts_lib, cats, df, freq, last_date):
     with open(OUT_HTML, "w", encoding="utf-8") as f:
         f.write(html)
     with open(OUT_META, "w", encoding="utf-8") as f:
-        json.dump({"generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # 显式用北京时间：CI runner 是 UTC，直接 now() 会让看板时间比实际早 8 小时
+        _bj = dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+        json.dump({"generated_at": _bj.strftime("%Y-%m-%d %H:%M:%S"),
                    "freq": freq, "data_until": last_date,
                    "n_etf": int(df["code"].nunique()), "n_cats": n_cats,
                    "summary": DATA["summary"]}, f, ensure_ascii=False, indent=2)

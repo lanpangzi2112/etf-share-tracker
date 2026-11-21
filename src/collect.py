@@ -52,9 +52,24 @@ for _k in _PROXY_KEYS:
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 
+# 「今天」必须按北京时间算，不能用 runner 的本地日期。
+# GitHub Actions 的 ubuntu runner 是 UTC：cron '30 23 * * *' 准点触发时
+# UTC 还停在前一天，dt.date.today() 会少算一天，prev_trade_day() 于是取到
+# 「大前天」，数据永久滞后一个交易日且日志显示"已入库、无需采集"。
+# 中国 1991 年后无夏令时，固定 UTC+8 即可，不依赖 tzdata。
+BJ_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
+
+
+def now_bj():
+    return dt.datetime.now(BJ_TZ)
+
+
+def today_bj():
+    return now_bj().strftime("%Y%m%d")
+
 
 def log(msg):
-    print("[%s] %s" % (dt.datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+    print("[%s] %s" % (now_bj().strftime("%H:%M:%S"), msg), flush=True)
 
 
 # ---------------- 交易日 ----------------
@@ -109,7 +124,7 @@ def missing_trade_days(tds, max_back=30, exclude=(), cutoff=None):
     2026-10-31 起：不再只看文件是否存在，还校验数据是否两所齐全
     ——残缺文件（如只有深交所）会被重新判定为缺口并重采。"""
     if cutoff is None:
-        cutoff = dt.date.today().strftime("%Y%m%d")
+        cutoff = today_bj()
     have = existing_data_days()
     eligible = [d for d in tds if d <= cutoff and d not in exclude]
     recent = eligible[-max_back:]
@@ -306,7 +321,7 @@ def main():
 
     os.makedirs(DATA_DIR, exist_ok=True)
     tds = load_trade_dates()
-    today = dt.date.today().strftime("%Y%m%d")
+    today = today_bj()
 
     if args.backfill:
         start, end = args.backfill.split(":")

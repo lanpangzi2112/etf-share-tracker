@@ -6,11 +6,16 @@ on:
     # 采集目标固定为"上一交易日"（见 src/collect.py），此时该日数据在交易所
     # 已发布 8 小时以上，必然齐全；早上更新，白天看时是最新的。
     # 避开整点 :00 —— 整点是 GitHub Actions 全局最拥堵的时段，会被延迟数小时。
+    # 注意："今天"的判定一律用北京时间（collect.py 内 BJ_TZ），
+    # 与 runner 的 UTC 日期、以及本 cron 的排队延迟都解耦。
     - cron: '30 23 * * *'
   workflow_dispatch:   # 允许在 Actions 页面手动补跑
 
 permissions:
   contents: write      # 允许把数据与看板 commit 回仓库
+
+env:
+  TZ: Asia/Shanghai    # 双保险：脚本已显式用 UTC+8，这里让 runner 上的其他工具也对齐
 
 jobs:
   collect-and-report:
@@ -40,7 +45,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "无变更（非交易日或数据未更新），跳过提交"
           else
-            git commit -m "chore: ETF份额数据更新 $(date -u +%Y-%m-%d)"
+            git commit -m "chore: ETF份额数据更新 $(date +%Y-%m-%d)"
             git push
           fi
 
