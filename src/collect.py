@@ -53,9 +53,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT, "data")
 
 # 「今天」必须按北京时间算，不能用 runner 的本地日期。
-# GitHub Actions 的 ubuntu runner 是 UTC：cron '30 23 * * *' 准点触发时
-# UTC 还停在前一天，dt.date.today() 会少算一天，prev_trade_day() 于是取到
-# 「大前天」，数据永久滞后一个交易日且日志显示"已入库、无需采集"。
+# GitHub Actions 的 ubuntu runner 是 UTC：只要 cron 的 UTC 时段与北京日期不同步
+# （历史上的 '30 23'、以及现在的 '5 21' 都是如此），dt.date.today() 就会少算一天，
+# prev_trade_day() 于是取到「大前天」，数据永久滞后一个交易日且日志显示
+# "已入库、无需采集"。
 # 中国 1991 年后无夏令时，固定 UTC+8 即可，不依赖 tzdata。
 BJ_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 
